@@ -3,10 +3,10 @@
 //  Shared by index.html (staff) and admin.html.
 //
 //  Timeline of one draw (ms):
-//     0 – 6000   balls swirl in the bowl
-//  6000 – 9000   big 3 · 2 · 1 countdown (balls still swirling)
-//  ~7600 – 8800  the drawn ball settles at the doorstep under the cap
-//  9000          cap opens
+//     0 – 9000   the drum spins: all balls turn together in one direction,
+//                speeding up, then slowing down during the countdown
+//  6000 – 9000   big 3 · 2 · 1 countdown
+//  9000          drum stops – the cap opens and the ball at the door goes out
 //  9400 – 10000  ball pops out through the cap
 //  10000 – 10400 cap closes
 //  10000 – 11000 ball flies to the middle and grows
@@ -18,8 +18,6 @@ export const REVEAL_MS = 11000; // when the name is shown
 
 const T = {
   countdown: 6000,
-  steer: 6000,
-  hold: 7600,
   open: 9000,
   opened: 9400,
   out: 10000,
@@ -38,6 +36,28 @@ const easeInOut = (t) => (t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2)
 const easeOutBack = (t) => { const c = 1.7; return 1 + (c + 1) * Math.pow(t - 1, 3) + c * Math.pow(t - 1, 2); };
 const clamp01 = (t) => Math.max(0, Math.min(1, t));
 const prog = (e, a, b) => clamp01((e - a) / (b - a));
+const TURNS = 6; // full turns of the drum per draw
+
+// Drum angle progress 0..1: speeds up, spins, then slows to a stop (trapezoid speed profile).
+function spinProgress(u, a = 0.1, d = 0.5) {
+  const vmax = 1 / (1 - a / 2 - (1 - d) / 2);
+  if (u <= 0) return 0;
+  if (u >= 1) return 1;
+  if (u < a) return (vmax * u * u) / (2 * a);
+  if (u < d) return vmax * (a / 2 + (u - a));
+  const t = u - d, L = 1 - d;
+  return vmax * (a / 2 + (d - a) + t - (t * t) / (2 * L));
+}
+function spinSpeed(u, a = 0.1, d = 0.5) {
+  if (u <= 0 || u >= 1) return 0;
+  if (u < a) return u / a;
+  if (u < d) return 1;
+  return 1 - (u - d) / (1 - d);
+}
+const shuffle = (arr) => {
+  for (let i = arr.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [arr[i], arr[j]] = [arr[j], arr[i]]; }
+  return arr;
+};
 
 // Cryptographically fair random index (used by the admin when drawing).
 export function fairIndex(n) {
@@ -143,8 +163,47 @@ export class DrawMachine {
     this.revealName = null;
     this.lid = 0;
     if (offsetMs >= REVEAL_MS) return this.showWinner(winner);
+    this.layoutDrum(winner);
     this.mode = "spin";
-    this.spin = { winner, start: performance.now() - offsetMs, revealed: false };
+    this.spin = { winner, start: performance.now() - offsetMs, revealed: false, released: false };
+  }
+
+  // Put the balls in rings pressed against the drum wall. Every ball turns with the drum,
+  // and the start angle is chosen so the drum stops with the drawn ball right under the door.
+  layoutDrum(winner) {
+    const n = this.balls.length;
+    let br = this.ballR, slots = [], outerCount = 0;
+    for (let tries = 0; tries < 14; tries++) {
+      slots = [];
+      outerCount = 0;
+      const gap = br * 2.1;
+      let rad = this.R - br - 3;
+      while (slots.length < n && rad > br * 0.6) {
+        const cap = Math.max(1, Math.floor((2 * Math.PI * rad) / gap));
+        const cnt = Math.min(cap, n - slots.length);
+        const off = Math.random() * Math.PI * 2;
+        for (let i = 0; i < cnt; i++) slots.push({ rf: rad / this.R, a: off + (i * 2 * Math.PI) / cnt });
+        if (!outerCount) outerCount = cnt;
+        rad -= gap;
+      }
+      if (slots.length < n && rad > -br * 0.2) slots.push({ rf: 0, a: 0 });
+      if (slots.length >= n) break;
+      br *= 0.94;
+    }
+    const wb = this.balls.find((b) => b.name === winner);
+    const others = shuffle(this.balls.filter((b) => b !== wb));
+    const winnerSlot = Math.floor(Math.random() * outerCount);
+    let k = 0;
+    slots.forEach((slot, i) => {
+      const b = i === winnerSlot ? wb : others[k++];
+      if (!b) return;
+      b.slot = slot;
+      b.r = br;
+      b.sx = b.x; b.sy = b.y;
+      b.wob = Math.random() * Math.PI * 2;
+    });
+    // start angle so that  slotAngle(winner) + theta0 + TURNS·2π  =  straight up
+    this.theta0 = -Math.PI / 2 - wb.slot.a - TURNS * Math.PI * 2;
   }
 
   showWinner(name) {
@@ -152,7 +211,7 @@ export class DrawMachine {
     this.spin = null;
     this.revealName = name;
     this.lid = 0;
-    this.balls.forEach((b) => { b.out = b.name === name; b.held = false; });
+    this.balls.forEach((b) => { b.out = b.name === name; b.held = false; b.slot = null; });
     if (!this.revealAt) this.revealAt = performance.now();
   }
 
@@ -161,11 +220,11 @@ export class DrawMachine {
     this.spin = null;
     this.revealName = null;
     this.lid = 0;
-    this.balls.forEach((b) => { b.out = false; b.held = false; });
+    this.balls.forEach((b) => { b.out = false; b.held = false; b.slot = null; b.r = this.ballR; });
   }
 
   // ───────── physics ─────────
-  step(blow, steerTo, steerK) {
+  step(blow) {
     const { cx, cy, R } = this;
     const k = R / 150; // scale physics to canvas size
     const live = this.balls.filter((b) => !b.out);
@@ -182,11 +241,6 @@ export class DrawMachine {
         b.vy += (dx / R) * 0.45 * k * blow;
       }
       b.vy += 0.32 * k; // gravity
-      if (steerTo && b.isWinner) {
-        b.vx += (steerTo.x - b.x) * 0.012 * steerK;
-        b.vy += (steerTo.y - b.y) * 0.012 * steerK;
-        b.vx *= 1 - 0.08 * steerK; b.vy *= 1 - 0.08 * steerK;
-      }
       b.vx *= blow > 0 ? 0.985 : 0.97;
       b.vy *= 0.985;
       const max = (blow > 0 ? 10 : 6) * k;
@@ -234,26 +288,43 @@ export class DrawMachine {
     this.raf = requestAnimationFrame(this._loop);
     const { ctx } = this;
 
-    let blow = 0, steerTo = null, steerK = 0;
+    let glow = 0;
     let wb = null, e = 0, count = 0, countFrac = 0;
+    let rigid = false;
 
     if (this.mode === "spin" && this.spin) {
       e = now - this.spin.start;
       wb = this.balls.find((b) => b.name === this.spin.winner);
-      this.balls.forEach((b) => (b.isWinner = b === wb));
 
-      // blower: full power, easing off just before the cap opens
-      blow = e < T.hold ? 1 : e < T.open ? 1 - prog(e, T.hold, T.open) * 0.85 : 0;
-
-      // the drawn ball drifts toward the doorstep during the countdown
-      if (wb && e >= T.steer && e < T.hold) { steerTo = this.doorstep; steerK = prog(e, T.steer, T.hold); }
-      if (wb && e >= T.hold && !wb.held && !wb.out) { wb.held = true; wb.hx = wb.x; wb.hy = wb.y; }
+      if (e < T.open) {
+        // the drum: every ball turns together around the centre
+        rigid = true;
+        const u = e / T.open;
+        const theta = this.theta0 + spinProgress(u) * TURNS * Math.PI * 2;
+        glow = spinSpeed(u);
+        const blend = easeInOut(prog(e, 0, 800)); // lift from resting into the drum
+        for (const b of this.balls) {
+          if (!b.slot) continue;
+          const ang = b.slot.a + theta;
+          const rad = b.slot.rf * this.R - Math.abs(Math.sin(e / 140 + b.wob)) * b.r * 0.12 * glow;
+          const tx = this.cx + Math.cos(ang) * rad;
+          const ty = this.cy + Math.sin(ang) * rad;
+          b.x = b.sx + (tx - b.sx) * blend;
+          b.y = b.sy + (ty - b.sy) * blend;
+          b.vx = 0; b.vy = 0;
+          b.rot = ang;
+        }
+      } else if (!this.spin.released) {
+        // drum stopped: the ball under the door is held there, the rest drop
+        this.spin.released = true;
+        if (wb) { wb.held = true; wb.hx = wb.x; wb.hy = wb.y; }
+      }
 
       // countdown 3 · 2 · 1
       if (e >= T.countdown && e < T.open) {
-        const s = (e - T.countdown) / 1000;
-        count = 3 - Math.floor(s);
-        countFrac = s - Math.floor(s);
+        const s2 = (e - T.countdown) / 1000;
+        count = 3 - Math.floor(s2);
+        countFrac = s2 - Math.floor(s2);
       }
 
       // cap
@@ -266,20 +337,18 @@ export class DrawMachine {
         this.showWinner(name);
         if (this.onReveal) this.onReveal(name);
       }
-    } else {
-      this.balls.forEach((b) => (b.isWinner = false));
     }
 
-    // held ball glides onto the doorstep
+    // held ball nudges into the doorway, then leaves when the cap is open
     if (wb && wb.held && this.mode === "spin") {
-      const t = easeInOut(prog(e, T.hold, T.open - 200));
+      const t = easeInOut(prog(e, T.open, T.opened));
       wb.x = wb.hx + (this.doorstep.x - wb.hx) * t;
       wb.y = wb.hy + (this.doorstep.y - wb.hy) * t;
       wb.vx = wb.vy = 0;
       if (e >= T.opened) { wb.out = true; wb.held = false; }
     }
 
-    this.step(blow, steerTo, steerK);
+    if (!rigid) this.step(0);
 
     // ───────── draw ─────────
     const { w, h, cx, cy, R } = this;
@@ -294,10 +363,10 @@ export class DrawMachine {
     ctx.fillStyle = g;
     ctx.beginPath(); ctx.arc(cx, cy, R, 0, Math.PI * 2); ctx.fill();
 
-    // air vent glow at the bottom while blowing
-    if (blow > 0) {
+    // motor glow while the drum turns
+    if (glow > 0) {
       const vg = ctx.createRadialGradient(cx, cy + R, 0, cx, cy + R, R * 0.7);
-      vg.addColorStop(0, `rgba(122,167,255,${0.35 * blow})`);
+      vg.addColorStop(0, `rgba(122,167,255,${0.35 * glow})`);
       vg.addColorStop(1, "rgba(122,167,255,0)");
       ctx.fillStyle = vg;
       ctx.beginPath(); ctx.arc(cx, cy, R - 2, 0, Math.PI * 2); ctx.fill();
