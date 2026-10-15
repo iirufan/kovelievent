@@ -17,6 +17,9 @@
       <p>One entry per phone, per award</p>
     </header>
 
+    <!-- Shown when the admin shares results or the lucky draw -->
+    <div id="display" class="card center" hidden></div>
+
     <div id="view" class="card center">
       <p class="muted pulse" id="status">Loading…</p>
       <noscript><p class="err">Please enable JavaScript.</p></noscript>
@@ -39,9 +42,19 @@
     import {
       doc, onSnapshot, getDoc, setDoc, writeBatch, arrayUnion, serverTimestamp,
     } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+    import { DrawMachine, syncDraw, barsHTML } from "./draw.js";
 
     const view = document.getElementById("view");
-    const render = (html) => (view.innerHTML = html);
+    const displayEl = document.getElementById("display");
+    let displayMode = null;
+    let unsubDisp = null;
+    let machine = null;
+    let viewIsWaiting = false;
+    const render = (html) => {
+      viewIsWaiting = false;
+      view.hidden = false;
+      view.innerHTML = html;
+    };
     const status = (t) => render(`<p class="muted pulse">${esc(t)}</p>`);
     const fail = (e) => { console.error(e); render(explainError(e)); };
 
@@ -80,6 +93,56 @@
         return fail(e);
       }
       listen();
+      listenDisplay();
+    }
+
+    // ════════════════════ RESULTS / LUCKY DRAW (shown when admin chooses) ════════════════════
+
+    function listenDisplay() {
+      onSnapshot(doc(db, "settings", "state"), (snap) => {
+        const mode = (snap.exists() && snap.data().display) || null;
+        if (mode === displayMode) return;
+        displayMode = mode;
+        if (unsubDisp) { unsubDisp(); unsubDisp = null; }
+        if (machine) { machine.destroy(); machine = null; }
+        displayEl.hidden = !mode;
+        updateViewVisibility();
+        if (mode === "results") showResultsDisplay();
+        else if (mode === "draw") showDrawDisplay();
+        else displayEl.innerHTML = "";
+      }, (e) => console.error(e));
+    }
+
+    function showResultsDisplay() {
+      displayEl.innerHTML = `<p class="muted pulse">Loading results…</p>`;
+      unsubDisp = onSnapshot(doc(db, "publicView", "results"), (s) => {
+        const r = s.exists() ? s.data() : null;
+        if (!r) { displayEl.innerHTML = `<p class="muted">Results coming soon…</p>`; return; }
+        displayEl.innerHTML = `
+          <span class="badge">${r.kind === "nominate" ? "NOMINATIONS" : "RESULTS"}</span>
+          <div class="big-emoji" style="margin-top:8px">${esc(r.emoji || "🏆")}</div>
+          <h2>${esc(r.title)}</h2>
+          ${r.subtitle ? `<div class="sub">${esc(r.subtitle)}</div>` : ""}
+          <p class="total">${r.total} ${r.kind === "nominate" ? "nominators" : "votes"}</p>
+          <div style="text-align:left">${barsHTML((r.rows || []).map((x) => [x.n, x.k])) || `<p class="muted">No entries yet.</p>`}</div>`;
+      }, (e) => (displayEl.innerHTML = explainError(e)));
+    }
+
+    function showDrawDisplay() {
+      displayEl.innerHTML = `
+        <span class="badge nom">LIVE</span>
+        <h2 id="drawTitle">Lucky Draw</h2>
+        <canvas id="drawCanvas" class="draw-canvas"></canvas>
+        <div id="drawPicks"></div>`;
+      machine = new DrawMachine(document.getElementById("drawCanvas"));
+      const update = syncDraw(machine, document.getElementById("drawPicks"), document.getElementById("drawTitle"));
+      unsubDisp = onSnapshot(doc(db, "draw", "current"), (s) => update(s.exists() ? s.data() : {}),
+        (e) => (displayEl.innerHTML = explainError(e)));
+    }
+
+    // While results/draw are shown and nothing is open for voting, hide the "Please wait" card.
+    function updateViewVisibility() {
+      view.hidden = !!displayMode && viewIsWaiting;
     }
 
     function listen() {
@@ -108,6 +171,8 @@
     }
 
     function showWaiting() {
+      viewIsWaiting = true;
+      updateViewVisibility();
       render(`
         <div class="big-emoji">⏳</div>
         <h2>Please wait</h2>
@@ -126,14 +191,8 @@
 
     // ════════════════════ NOMINATION ════════════════════
     async function showNominate(catId, cat, key) {
-      const datalist = (cat.nominees || []).map((n) => `<option value="${esc(n)}"></option>`).join("");
-
-      // Form already on screen → just refresh suggestions, keep what the user typed.
-      if (formShown) {
-        const dl = document.getElementById("nameList");
-        if (dl) dl.innerHTML = datalist;
-        return;
-      }
+      // Form already on screen → keep what the user is typing.
+      if (formShown) return;
 
       let mine;
       try {
@@ -150,11 +209,10 @@
         <p class="muted">Nominate up to <b>2 people</b> for this award.</p>
         <div class="nom-form">
           <label for="n1">1st name</label>
-          <input type="text" id="n1" list="nameList" maxlength="40" autocomplete="off" placeholder="Full name" />
+          <input type="text" id="n1" name="nom-${Date.now()}-a" maxlength="40" autocomplete="off" autocorrect="off" spellcheck="false" placeholder="Full name" />
           <label for="n2">2nd name (optional)</label>
-          <input type="text" id="n2" list="nameList" maxlength="40" autocomplete="off" placeholder="Full name" />
-          <datalist id="nameList">${datalist}</datalist>
-          <p class="hint">Start typing to pick a name others have already nominated, so the same person isn't listed twice.</p>
+          <input type="text" id="n2" name="nom-${Date.now()}-b" maxlength="40" autocomplete="off" autocorrect="off" spellcheck="false" placeholder="Full name" />
+          <p class="hint">Please write the full name so it matches the same person.</p>
         </div>
         <button id="send" class="btn block">Send nomination</button>
         <div id="msg"></div>
