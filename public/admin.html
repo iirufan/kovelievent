@@ -30,6 +30,17 @@
         <!-- LEFT: awards -->
         <div class="hide-in-present">
           <div class="card">
+            <strong>Staff phones show</strong>
+            <p class="muted" id="dispLine" style="font-size:14px;margin:6px 0 10px"></p>
+            <div class="row">
+              <button id="dispResults" class="btn small">📊 Results of selected award</button>
+              <button id="dispDraw" class="btn small nom">🎱 Lucky draw</button>
+              <button id="dispOff" class="btn small secondary">Hide</button>
+            </div>
+            <p class="hint">Voting / nomination still works underneath. Click an award name to select it.</p>
+          </div>
+
+          <div class="card">
             <div class="row">
               <strong>Awards</strong>
               <span class="spacer"></span>
@@ -94,8 +105,43 @@
             <img src="logo.png" alt="" />
             <span><span class="brand">KOVELI</span> Awards <span class="year">2026</span></span>
           </div>
-          <div class="card" id="results">
+          <div class="tabs hide-in-present">
+            <button class="tab active" data-tab="results">📊 Results</button>
+            <button class="tab" data-tab="draw">🎱 Lucky draw</button>
+          </div>
+          <div class="card" id="results" data-pane="results">
             <p class="muted">Select an award to see results.</p>
+          </div>
+
+          <div data-pane="draw" hidden>
+            <div class="card center">
+              <h2 id="drawTitle">Lucky Draw</h2>
+              <canvas id="drawCanvas" class="draw-canvas"></canvas>
+              <div class="row hide-in-present" style="justify-content:center;margin:6px 0 4px">
+                <button id="btnDraw" class="btn">🎲 Draw a name</button>
+              </div>
+              <p class="muted hide-in-present" id="drawInfo" style="font-size:14px"></p>
+              <div id="drawPicks"></div>
+            </div>
+
+            <div class="card hide-in-present">
+              <strong>Draw setup</strong>
+              <label>Draw title</label>
+              <input type="text" id="drawName" placeholder="Lucky Draw" />
+              <label>Names in the draw — one per line</label>
+              <textarea id="drawNames" placeholder="Type names, or load them from an award below"></textarea>
+              <div class="row" style="margin-top:10px">
+                <select id="drawFrom"></select>
+                <button id="drawLoad" class="btn small secondary">Load award nominees</button>
+              </div>
+              <div class="row" style="margin-top:12px">
+                <button id="drawSave" class="btn small">Save names</button>
+                <span class="spacer"></span>
+                <button id="drawReset" class="btn small danger">Clear drawn names</button>
+              </div>
+              <p class="hint">Names already drawn are removed from the next draw automatically.</p>
+              <div id="drawMsg"></div>
+            </div>
           </div>
           <div class="row">
             <button id="btnPresent" class="btn small secondary">Present full screen</button>
@@ -113,8 +159,9 @@
       GoogleAuthProvider, signInWithPopup, signInWithRedirect, getRedirectResult, onAuthStateChanged, signOut,
     } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
     import {
-      doc, collection, onSnapshot, getDoc, setDoc, updateDoc, deleteDoc, writeBatch, query, where, getDocs,
+      doc, collection, onSnapshot, getDoc, setDoc, updateDoc, deleteDoc, writeBatch, query, where, getDocs, serverTimestamp,
     } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+    import { DrawMachine, syncDraw, fairIndex, DRAW_MS } from "./draw.js";
 
     const $ = (id) => document.getElementById(id);
     let cats = [];             // [{id, ...data}]
@@ -125,6 +172,10 @@
     let viewId = null;         // award shown in the results panel
     let editId = null;
     let started = false;
+    let display = null;        // what staff phones show on top: null | "results" | "draw"
+    let resultsCat = null;     // award whose results are shown to staff
+    let drawData = {};         // draw/current
+    let lastPublished = "";
 
     // ---------- auth ----------
     const loginErr = (e) => { console.error(e); $("loginErr").innerHTML = explainError(e); };
@@ -197,6 +248,8 @@
         const d = s.exists() ? s.data() : {};
         activeId = d.activeCategory || null;
         phase = d.phase || "vote";
+        display = d.display || null;
+        resultsCat = d.resultsCat || null;
         if (activeId) viewId = activeId;
         renderAll();
       }, showErr);
@@ -221,6 +274,12 @@
         noms = qs.docs.map((d) => d.data());
         renderAll();
       }, showErr);
+
+      onSnapshot(doc(db, "draw", "current"), (s) => {
+        drawData = s.exists() ? s.data() : {};
+        drawUpdate(drawData);
+        renderDrawControls();
+      }, showErr);
     }
     function showErr(e) { console.error(e); $("results").innerHTML = explainError(e); }
     const safe = (fn) => async (...a) => { try { await fn(...a); } catch (e) { showErr(e); } };
@@ -229,7 +288,66 @@
     const nomCount = (catId) => noms.filter((n) => n.categoryId === catId).length;
     const catName = (c) => `${c.emoji || "🏆"} ${c.title}${c.subtitle ? " — " + c.subtitle : ""}`;
 
-    function renderAll() { renderCats(); renderResults(); }
+    function renderAll() { renderCats(); renderResults(); renderDisplayLine(); publishResults(); renderDrawSelect(); }
+
+    // Votes (or nominations, during/after the nomination phase) for one award.
+    function tallyFor(c) {
+      const isLive = c.id === activeId;
+      const kind = (isLive ? phase === "nominate" : voteCount(c.id) === 0 && nomCount(c.id) > 0) ? "nominate" : "vote";
+      const tally = new Map((c.nominees || []).map((n) => [n, 0]));
+      let total = 0;
+      if (kind === "nominate") {
+        const mine = noms.filter((n) => n.categoryId === c.id);
+        total = mine.length;
+        mine.forEach((n) => (n.names || []).forEach((name) => tally.set(name, (tally.get(name) || 0) + 1)));
+      } else {
+        const mine = votes.filter((v) => v.categoryId === c.id);
+        total = mine.length;
+        mine.forEach((v) => tally.set(v.nominee, (tally.get(v.nominee) || 0) + 1));
+      }
+      const rows = [...tally.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+      return { kind, rows, total, isLive };
+    }
+
+    function renderDisplayLine() {
+      const rc = cats.find((c) => c.id === resultsCat);
+      $("dispLine").innerHTML =
+        display === "results" ? `📊 Results of <b>${esc(rc ? catName(rc) : "—")}</b>` :
+        display === "draw" ? `🎱 <b>Lucky draw</b> (live)` :
+        "Normal screen (voting / nomination only)";
+      $("dispOff").disabled = !display;
+      const sel = cats.find((c) => c.id === viewId);
+      $("dispResults").textContent = sel ? `📊 Show results: ${sel.title}${sel.subtitle ? " " + sel.subtitle : ""}` : "📊 Select an award first";
+      $("dispResults").disabled = !sel;
+    }
+
+    // Keep the staff-visible results copy up to date while it's shown.
+    async function publishResults() {
+      if (display !== "results" || !resultsCat) return;
+      const c = cats.find((x) => x.id === resultsCat);
+      if (!c) return;
+      const t = tallyFor(c);
+      const payload = {
+        categoryId: c.id, title: c.title, subtitle: c.subtitle || "", emoji: c.emoji || "🏆",
+        kind: t.kind, rows: t.rows.map(([n, k]) => ({ n, k })), total: t.total,
+      };
+      const key = JSON.stringify(payload);
+      if (key === lastPublished) return;
+      lastPublished = key;
+      try {
+        await setDoc(doc(db, "publicView", "results"), { ...payload, updatedAt: serverTimestamp() });
+      } catch (e) { lastPublished = ""; showErr(e); }
+    }
+
+    $("dispResults").onclick = safe(async () => {
+      if (!viewId) return;
+      lastPublished = "";
+      resultsCat = viewId; display = "results";
+      await publishResults();
+      await setDoc(doc(db, "settings", "state"), { display: "results", resultsCat: viewId }, { merge: true });
+    });
+    $("dispDraw").onclick = safe(() => setDoc(doc(db, "settings", "state"), { display: "draw" }, { merge: true }));
+    $("dispOff").onclick = safe(() => setDoc(doc(db, "settings", "state"), { display: null }, { merge: true }));
 
     function renderCats() {
       const live = cats.find((c) => c.id === activeId);
@@ -271,7 +389,7 @@
       const c = cats.find((x) => x.id === viewId);
       if (!c) { $("results").innerHTML = `<p class="muted">Select an award to see results.</p>`; return; }
       const isLive = c.id === activeId;
-      const showNoms = isLive ? phase === "nominate" : voteCount(c.id) === 0 && nomCount(c.id) > 0;
+      const showNoms = tallyFor(c).kind === "nominate";
       const head = `
         <div class="center">
           <div class="big-emoji">${esc(c.emoji || "🏆")}</div>
@@ -388,6 +506,83 @@
       await deleteDoc(doc(db, "categories", editId));
       $("editor").hidden = true; editId = null;
     });
+
+    // ---------- lucky draw ----------
+    const machine = new DrawMachine($("drawCanvas"));
+    const drawUpdate = syncDraw(machine, $("drawPicks"), $("drawTitle"));
+
+    const drawPool = () => (drawData.pool || []);
+    const drawRemaining = () => {
+      const picked = new Set((drawData.picks || []).map((p) => p.name));
+      return drawPool().filter((n) => !picked.has(n));
+    };
+
+    function renderDrawControls() {
+      const rem = drawRemaining();
+      $("drawInfo").textContent = `${rem.length} name${rem.length === 1 ? "" : "s"} left in the draw · ${(drawData.picks || []).length} drawn`;
+      if (document.activeElement !== $("drawNames")) $("drawNames").value = drawPool().join("\n");
+      if (document.activeElement !== $("drawName")) $("drawName").value = drawData.title || "";
+      $("btnDraw").disabled = !rem.length || machine.mode === "spin";
+    }
+    setInterval(() => { if (started) $("btnDraw").disabled = !drawRemaining().length || machine.mode === "spin"; }, 500);
+
+    function renderDrawSelect() {
+      const cur = $("drawFrom").value;
+      $("drawFrom").innerHTML = cats.map((c) => `<option value="${esc(c.id)}">${esc(catName(c))} (${(c.nominees || []).length})</option>`).join("");
+      if (cur) $("drawFrom").value = cur;
+    }
+
+    $("drawLoad").onclick = () => {
+      const c = cats.find((x) => x.id === $("drawFrom").value);
+      if (!c) return;
+      $("drawNames").value = (c.nominees || []).join("\n");
+      if (!$("drawName").value) $("drawName").value = `${c.title}${c.subtitle ? " – " + c.subtitle : ""}`;
+      $("drawMsg").innerHTML = `<p class="hint">Loaded. Press <b>Save names</b> to use them.</p>`;
+    };
+
+    $("drawSave").onclick = safe(async () => {
+      const seen = new Set();
+      const pool = [];
+      $("drawNames").value.split("\n").forEach((raw) => {
+        const n = cleanName(raw);
+        if (n && !seen.has(nameKey(n))) { seen.add(nameKey(n)); pool.push(n); }
+      });
+      await setDoc(doc(db, "draw", "current"), {
+        title: $("drawName").value.trim() || "Lucky Draw",
+        pool,
+        spin: null,
+      }, { merge: true });
+      $("drawMsg").innerHTML = `<p class="done" style="font-size:14px">Saved ${pool.length} names ✓</p>`;
+    });
+
+    $("drawReset").onclick = safe(async () => {
+      if (!confirm("Clear the list of drawn names and put everyone back in the draw?")) return;
+      await setDoc(doc(db, "draw", "current"), { picks: [], spin: null }, { merge: true });
+      $("drawMsg").innerHTML = `<p class="done" style="font-size:14px">Cleared ✓</p>`;
+    });
+
+    $("btnDraw").onclick = safe(async () => {
+      const rem = drawRemaining();
+      if (!rem.length || machine.mode === "spin") return;
+      $("btnDraw").disabled = true;
+      const winner = rem[fairIndex(rem.length)];
+      const spinId = Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
+      const picks = [...(drawData.picks || []), { no: (drawData.picks || []).length + 1, name: winner, spinId }];
+      await setDoc(doc(db, "draw", "current"), {
+        title: drawData.title || $("drawName").value.trim() || "Lucky Draw",
+        spin: { id: spinId, winner, pool: rem, at: serverTimestamp() },
+        picks,
+      }, { merge: true });
+      // make sure staff phones are watching
+      if (display !== "draw") await setDoc(doc(db, "settings", "state"), { display: "draw" }, { merge: true });
+    });
+
+    // ---------- tabs ----------
+    document.querySelectorAll(".tab").forEach((t) => (t.onclick = () => {
+      document.querySelectorAll(".tab").forEach((x) => x.classList.toggle("active", x === t));
+      document.querySelectorAll("[data-pane]").forEach((p) => (p.hidden = p.dataset.pane !== t.dataset.tab));
+      if (t.dataset.tab === "draw") machine.resize();
+    }));
 
     // ---------- present mode ----------
     $("btnPresent").onclick = () => {
