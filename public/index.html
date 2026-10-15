@@ -3,15 +3,18 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-  <title>Office Awards – Vote</title>
+  <title>KOVELI Awards 2026</title>
   <link rel="stylesheet" href="style.css" />
+  <link rel="icon" type="image/png" href="favicon.png" />
+  <link rel="apple-touch-icon" href="apple-touch-icon.png" />
+  <meta name="theme-color" content="#0f1020" />
 </head>
 <body>
   <div class="wrap">
     <header class="top">
-      <div class="logo">🏆</div>
-      <h1>Office Awards</h1>
-      <p>One vote per phone, per award</p>
+      <img class="brand-logo" src="logo.png" alt="KOVELI logo" />
+      <h1><span class="brand">KOVELI</span> Awards <span class="year">2026</span></h1>
+      <p>One entry per phone, per award</p>
     </header>
 
     <div id="view" class="card center">
@@ -31,9 +34,11 @@
   </script>
 
   <script type="module">
-    import { db, auth, esc, explainError, withTimeout, CONFIG_MISSING } from "./firebase-config.js";
+    import { db, auth, esc, explainError, withTimeout, CONFIG_MISSING, cleanName, nameKey } from "./firebase-config.js";
     import { signInAnonymously, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
-    import { doc, onSnapshot, getDoc, setDoc, serverTimestamp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+    import {
+      doc, onSnapshot, getDoc, setDoc, writeBatch, arrayUnion, serverTimestamp,
+    } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 
     const view = document.getElementById("view");
     const render = (html) => (view.innerHTML = html);
@@ -42,10 +47,12 @@
 
     let uid = null;
     let started = false;
-    let unsubState = null;
     let unsubCat = null;
-    let currentCatId;     // undefined until first state arrives
+    let currentKey;        // "<categoryId>|<phase>" currently shown
+    let currentCatId = null;
+    let currentCat = null; // latest category data
     let selected = null;
+    let formShown = false; // nomination form on screen (don't wipe what the user is typing)
 
     if (CONFIG_MISSING) {
       fail({ code: "config-missing" });
@@ -76,17 +83,26 @@
     }
 
     function listen() {
-      unsubState = onSnapshot(doc(db, "settings", "state"), (snap) => {
-        const active = snap.exists() ? snap.data().activeCategory || null : null;
-        if (active === currentCatId) return;
+      onSnapshot(doc(db, "settings", "state"), (snap) => {
+        const d = snap.exists() ? snap.data() : {};
+        const active = d.activeCategory || null;
+        const phase = d.phase || "vote";
+        const key = active ? `${active}|${phase}` : null;
+        if (key === currentKey) return;
+        currentKey = key;
         currentCatId = active;
+        currentCat = null;
         selected = null;
+        formShown = false;
         if (unsubCat) { unsubCat(); unsubCat = null; }
         if (!active) return showWaiting();
         status("Loading award…");
         unsubCat = onSnapshot(doc(db, "categories", active), (c) => {
+          if (key !== currentKey) return;
           if (!c.exists()) return showWaiting();
-          showCategory(active, c.data());
+          currentCat = c.data();
+          if (phase === "nominate") showNominate(active, currentCat, key);
+          else showVote(active, currentCat, key);
         }, fail);
       }, fail);
     }
@@ -95,19 +111,112 @@
       render(`
         <div class="big-emoji">⏳</div>
         <h2>Please wait</h2>
-        <p class="muted pulse">Voting will open here when the host starts the next award.</p>
+        <p class="muted pulse">The next award will open here when the host starts it.</p>
       `);
     }
 
-    function header(cat) {
+    function header(cat, tag) {
       return `
         <div class="big-emoji">${esc(cat.emoji || "🏆")}</div>
+        ${tag ? `<span class="badge ${tag === "NOMINATE" ? "nom" : ""}">${tag}</span>` : ""}
         <h2>${esc(cat.title)}</h2>
         ${cat.subtitle ? `<div class="sub">${esc(cat.subtitle)}</div>` : ""}
       `;
     }
 
-    async function showCategory(catId, cat) {
+    // ════════════════════ NOMINATION ════════════════════
+    async function showNominate(catId, cat, key) {
+      const datalist = (cat.nominees || []).map((n) => `<option value="${esc(n)}"></option>`).join("");
+
+      // Form already on screen → just refresh suggestions, keep what the user typed.
+      if (formShown) {
+        const dl = document.getElementById("nameList");
+        if (dl) dl.innerHTML = datalist;
+        return;
+      }
+
+      let mine;
+      try {
+        mine = await getDoc(doc(db, "nominations", `${catId}_${uid}`));
+      } catch (e) {
+        return fail(e);
+      }
+      if (key !== currentKey) return;
+      if (mine.exists()) return showNominated(cat, mine.data().names || []);
+
+      formShown = true;
+      render(`
+        ${header(cat, "NOMINATE")}
+        <p class="muted">Nominate up to <b>2 people</b> for this award.</p>
+        <div class="nom-form">
+          <label for="n1">1st name</label>
+          <input type="text" id="n1" list="nameList" maxlength="40" autocomplete="off" placeholder="Full name" />
+          <label for="n2">2nd name (optional)</label>
+          <input type="text" id="n2" list="nameList" maxlength="40" autocomplete="off" placeholder="Full name" />
+          <datalist id="nameList">${datalist}</datalist>
+          <p class="hint">Start typing to pick a name others have already nominated, so the same person isn't listed twice.</p>
+        </div>
+        <button id="send" class="btn block">Send nomination</button>
+        <div id="msg"></div>
+      `);
+      document.getElementById("send").addEventListener("click", () => sendNomination(catId, key));
+    }
+
+    async function sendNomination(catId, key) {
+      const msg = (t) => (document.getElementById("msg").innerHTML = `<p class="err">${esc(t)}</p>`);
+      const existing = currentCat?.nominees || [];
+      const byKey = new Map(existing.map((n) => [nameKey(n), n]));
+
+      // Clean names, reuse the existing spelling if that person is already listed.
+      const typed = [document.getElementById("n1").value, document.getElementById("n2").value]
+        .map(cleanName)
+        .filter(Boolean)
+        .map((n) => byKey.get(nameKey(n)) || n);
+
+      if (!typed.length) return msg("Please enter at least one name.");
+      if (typed.length === 2 && nameKey(typed[0]) === nameKey(typed[1])) return msg("Please enter two different people.");
+      if (typed.some((n) => n.length < 2)) return msg("Please enter a full name.");
+
+      const newNames = typed.filter((n) => !byKey.has(nameKey(n)));
+
+      const btn = document.getElementById("send");
+      btn.disabled = true; btn.textContent = "Sending…";
+      try {
+        const b = writeBatch(db);
+        b.set(doc(db, "nominations", `${catId}_${uid}`), {
+          categoryId: catId,
+          names: typed,
+          uid,
+          at: serverTimestamp(),
+        });
+        // Add only the new names to the award's nominee list (arrayUnion never duplicates).
+        if (newNames.length) {
+          b.update(doc(db, "categories", catId), { nominees: arrayUnion(...newNames) });
+        }
+        await withTimeout(b.commit());
+        if (key === currentKey) showNominated(currentCat || {}, typed);
+      } catch (e) {
+        console.error(e);
+        btn.disabled = false; btn.textContent = "Send nomination";
+        msg(e.code === "permission-denied"
+          ? "Not accepted – you may have already nominated, or nominations just closed."
+          : e.code === "timeout" ? "No connection. Check your internet and try again." : e.message);
+      }
+    }
+
+    function showNominated(cat, names) {
+      formShown = false;
+      render(`
+        ${header(cat, "NOMINATE")}
+        <p class="done">✓ Nomination sent</p>
+        <p>You nominated</p>
+        <div class="chips">${names.map((n) => `<span class="chip">${esc(n)}</span>`).join("")}</div>
+        <p class="muted pulse" style="margin-top:16px">Keep this page open – voting will appear here automatically.</p>
+      `);
+    }
+
+    // ════════════════════ VOTING ════════════════════
+    async function showVote(catId, cat, key) {
       // Did this phone already vote in this award?
       let mine = null;
       try {
@@ -115,16 +224,16 @@
       } catch (e) {
         return fail(e);
       }
-      if (catId !== currentCatId) return; // admin switched meanwhile
+      if (key !== currentKey) return; // admin switched meanwhile
       if (mine.exists()) return showVoted(cat, mine.data().nominee);
 
       const nominees = cat.nominees || [];
       if (!nominees.length) {
-        return render(`${header(cat)}<p class="muted">No nominees added yet.</p>`);
+        return render(`${header(cat, "VOTE")}<p class="muted">No nominees added yet.</p>`);
       }
       if (selected && !nominees.includes(selected)) selected = null;
       render(`
-        ${header(cat)}
+        ${header(cat, "VOTE")}
         <p class="muted">Tap a name, then submit.</p>
         <div class="nominees">
           ${nominees.map((n, i) => `<button class="nominee${n === selected ? " selected" : ""}" data-i="${i}">${esc(n)}</button>`).join("")}
@@ -139,10 +248,10 @@
           document.getElementById("submit").disabled = false;
         })
       );
-      document.getElementById("submit").addEventListener("click", () => submit(catId, cat));
+      document.getElementById("submit").addEventListener("click", () => submitVote(catId, cat));
     }
 
-    async function submit(catId, cat) {
+    async function submitVote(catId, cat) {
       if (!selected) return;
       const btn = document.getElementById("submit");
       btn.disabled = true; btn.textContent = "Sending…";
@@ -168,7 +277,7 @@
 
     function showVoted(cat, nominee) {
       render(`
-        ${header(cat)}
+        ${header(cat, "VOTE")}
         <p class="done">✓ Vote recorded</p>
         <p>You voted for <strong>${esc(nominee)}</strong></p>
         <p class="muted pulse">Keep this page open – the next award will appear automatically.</p>
