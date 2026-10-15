@@ -1,0 +1,322 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Office Awards – Admin</title>
+  <link rel="stylesheet" href="style.css" />
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+</head>
+<body>
+  <div class="wrap wide">
+    <header class="top hide-in-present">
+      <div class="logo">🏆</div>
+      <h1>Office Awards — Admin</h1>
+      <p id="who">Not signed in</p>
+    </header>
+
+    <div id="login" class="card center" hidden>
+      <p>Sign in with the admin Google account.</p>
+      <button id="btnLogin" class="btn">Sign in with Google</button>
+      <div id="loginErr"></div>
+    </div>
+
+    <div id="app" hidden>
+      <div class="grid2">
+        <!-- LEFT: awards -->
+        <div class="hide-in-present">
+          <div class="card">
+            <div class="row">
+              <strong>Awards</strong>
+              <span class="spacer"></span>
+              <button id="btnClose" class="btn small secondary">Close voting</button>
+            </div>
+            <p class="muted" id="liveLine" style="font-size:14px"></p>
+            <div id="cats"></div>
+            <button id="btnSeed" class="btn small secondary" hidden>Create default awards</button>
+          </div>
+
+          <div class="card" id="editor" hidden>
+            <div class="row">
+              <strong id="edTitle">Edit award</strong>
+              <span class="spacer"></span>
+              <button id="edCancel" class="btn small secondary">Cancel</button>
+            </div>
+            <label>Title</label>
+            <input type="text" id="edName" />
+            <label>Subtitle (e.g. Male / Female)</label>
+            <input type="text" id="edSub" />
+            <label>Emoji</label>
+            <input type="text" id="edEmoji" maxlength="4" />
+            <label>Nominees — one name per line</label>
+            <textarea id="edNoms"></textarea>
+            <div class="row" style="margin-top:12px">
+              <button id="edSave" class="btn">Save</button>
+              <span class="spacer"></span>
+              <button id="edReset" class="btn small danger">Reset votes</button>
+              <button id="edDelete" class="btn small danger">Delete award</button>
+            </div>
+            <div id="edMsg"></div>
+          </div>
+
+          <div class="card">
+            <strong>Add a new award</strong>
+            <label>Title</label>
+            <input type="text" id="newName" placeholder="e.g. Best Smile" />
+            <div class="row" style="margin-top:12px">
+              <button id="btnAdd" class="btn small">Add award</button>
+            </div>
+          </div>
+
+          <div class="card center">
+            <strong>Staff voting link</strong>
+            <p class="muted" style="font-size:14px">Show this QR on screen — staff scan it with their phones.</p>
+            <div id="qr"></div>
+            <p class="link" id="voteLink"></p>
+          </div>
+
+          <div class="card center">
+            <button id="btnLogout" class="btn small secondary">Sign out</button>
+          </div>
+        </div>
+
+        <!-- RIGHT: live results -->
+        <div>
+          <div class="card" id="results">
+            <p class="muted">Select an award to see results.</p>
+          </div>
+          <div class="row">
+            <button id="btnPresent" class="btn small secondary">Present results full screen</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script type="module">
+    import { db, auth, esc, ADMIN_EMAILS, DEFAULT_CATEGORIES, explainError, withTimeout, CONFIG_MISSING } from "./firebase-config.js";
+    import {
+      GoogleAuthProvider, signInWithPopup, signInWithRedirect, getRedirectResult, onAuthStateChanged, signOut,
+    } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
+    import {
+      doc, collection, onSnapshot, getDoc, setDoc, updateDoc, deleteDoc, writeBatch, query, where, getDocs,
+    } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+
+    const $ = (id) => document.getElementById(id);
+    let cats = [];             // [{id, ...data}]
+    let votes = [];            // [{categoryId, nominee}]
+    let activeId = null;       // award currently open for voting
+    let viewId = null;         // award shown in the results panel
+    let editId = null;
+    let started = false;
+
+    // ---------- auth ----------
+    const loginErr = (e) => { console.error(e); $("loginErr").innerHTML = explainError(e); };
+
+    if (location.protocol === "file:") {
+      $("login").hidden = false;
+      $("btnLogin").hidden = true;
+      $("loginErr").innerHTML = explainError({ message: "Open this page through a web server (firebase deploy, Live Server, or npx serve public), not by double-clicking the file." });
+    } else if (CONFIG_MISSING) {
+      $("login").hidden = false;
+      $("btnLogin").hidden = true;
+      loginErr({ code: "config-missing" });
+    } else {
+      getRedirectResult(auth).catch(loginErr);
+      onAuthStateChanged(auth, (user) => {
+        if (!user || user.isAnonymous) {
+          $("login").hidden = false; $("app").hidden = true; $("who").textContent = "Not signed in";
+          return;
+        }
+        $("who").textContent = `Signed in as ${user.email}`;
+        if (!ADMIN_EMAILS.includes(user.email)) {
+          $("login").hidden = false; $("app").hidden = true;
+          $("loginErr").innerHTML = explainError({
+            message: `${user.email} is not an admin. Add this email to ADMIN_EMAILS in firebase-config.js AND inside isAdmin() in firestore.rules (then publish the rules).`,
+          }) + `<button class="btn small secondary" id="btnSwitch" style="margin-top:10px">Use another account</button>`;
+          $("btnSwitch").onclick = () => signOut(auth);
+          return;
+        }
+        $("loginErr").innerHTML = "";
+        $("login").hidden = true; $("app").hidden = false;
+        if (!started) { started = true; startListeners(); }
+      });
+    }
+
+    $("btnLogin").onclick = async () => {
+      $("loginErr").innerHTML = "";
+      const provider = new GoogleAuthProvider();
+      provider.setCustomParameters({ prompt: "select_account" });
+      try {
+        await signInWithPopup(auth, provider);
+      } catch (e) {
+        // Popups are often blocked on phones / some browsers → fall back to a full-page redirect.
+        if (e.code === "auth/popup-blocked" || e.code === "auth/operation-not-supported-in-this-environment") {
+          return signInWithRedirect(auth, provider).catch(loginErr);
+        }
+        loginErr(e);
+      }
+    };
+    $("btnLogout").onclick = () => signOut(auth).then(() => location.reload());
+
+    // ---------- QR / link ----------
+    const voteUrl = new URL("./", location.href).href;
+    $("voteLink").textContent = voteUrl;
+    if (window.QRCode) new QRCode($("qr"), { text: voteUrl, width: 200, height: 200 });
+
+    // ---------- live data ----------
+    async function startListeners() {
+      $("results").innerHTML = `<p class="muted pulse">Connecting to database…</p>`;
+      try {
+        // One-time read first, so a missing database / bad rules shows a clear error instead of hanging.
+        await withTimeout(getDoc(doc(db, "settings", "state")));
+        await withTimeout(getDocs(collection(db, "votes")));
+      } catch (e) {
+        return showErr(e);
+      }
+      $("results").innerHTML = `<p class="muted">Select an award to see results.</p>`;
+
+      onSnapshot(doc(db, "settings", "state"), (s) => {
+        activeId = s.exists() ? s.data().activeCategory : null;
+        if (activeId) viewId = activeId;
+        renderAll();
+      }, showErr);
+
+      onSnapshot(collection(db, "categories"), (qs) => {
+        cats = qs.docs.map((d) => ({ id: d.id, ...d.data() })).sort((a, b) => (a.order ?? 99) - (b.order ?? 99));
+        $("btnSeed").hidden = cats.length > 0;
+        renderAll();
+      }, showErr);
+
+      onSnapshot(collection(db, "votes"), (qs) => {
+        votes = qs.docs.map((d) => d.data());
+        renderAll();
+      }, showErr);
+    }
+    function showErr(e) { console.error(e); $("results").innerHTML = explainError(e); }
+    const safe = (fn) => async (...a) => { try { await fn(...a); } catch (e) { showErr(e); } };
+
+    const countFor = (catId) => votes.filter((v) => v.categoryId === catId).length;
+    const catName = (c) => `${c.emoji || "🏆"} ${c.title}${c.subtitle ? " — " + c.subtitle : ""}`;
+
+    function renderAll() { renderCats(); renderResults(); }
+
+    function renderCats() {
+      const live = cats.find((c) => c.id === activeId);
+      $("liveLine").innerHTML = live ? `Voting open: <strong>${esc(catName(live))}</strong>` : "Voting is closed. Pick an award and press Open.";
+      $("btnClose").disabled = !activeId;
+      $("cats").innerHTML = cats.map((c) => `
+        <div class="cat ${c.id === activeId ? "live" : ""}">
+          <div style="flex:1;min-width:0;cursor:pointer" data-view="${esc(c.id)}">
+            <div class="name">${esc(catName(c))} ${c.id === activeId ? '<span class="badge">LIVE</span>' : ""}</div>
+            <div class="meta">${(c.nominees || []).length} nominees · ${countFor(c.id)} votes</div>
+          </div>
+          <button class="btn small secondary" data-edit="${esc(c.id)}">Edit</button>
+          ${c.id === activeId ? "" : `<button class="btn small" data-open="${esc(c.id)}">Open</button>`}
+        </div>`).join("");
+      $("cats").querySelectorAll("[data-view]").forEach((el) => (el.onclick = () => { viewId = el.dataset.view; renderResults(); }));
+      $("cats").querySelectorAll("[data-edit]").forEach((el) => (el.onclick = () => openEditor(el.dataset.edit)));
+      $("cats").querySelectorAll("[data-open]").forEach((el) => (el.onclick = () => openVoting(el.dataset.open)));
+    }
+
+    function renderResults() {
+      const c = cats.find((x) => x.id === viewId);
+      if (!c) { $("results").innerHTML = `<p class="muted">Select an award to see results.</p>`; return; }
+      const mine = votes.filter((v) => v.categoryId === c.id);
+      const tally = new Map((c.nominees || []).map((n) => [n, 0]));
+      mine.forEach((v) => tally.set(v.nominee, (tally.get(v.nominee) || 0) + 1));
+      const rows = [...tally.entries()].sort((a, b) => b[1] - a[1]);
+      const max = Math.max(1, ...rows.map((r) => r[1]));
+      const top = rows.length && rows[0][1] > 0 ? rows[0][1] : -1;
+      $("results").innerHTML = `
+        <div class="center">
+          <div class="big-emoji">${esc(c.emoji || "🏆")}</div>
+          <h2>${esc(c.title)}</h2>
+          ${c.subtitle ? `<div class="sub">${esc(c.subtitle)}</div>` : ""}
+          <p class="total">${mine.length} vote${mine.length === 1 ? "" : "s"} ${c.id === activeId ? "· <span class='pulse'>voting open</span>" : "· closed"}</p>
+        </div>
+        ${rows.map(([n, k]) => `
+          <div class="bar-row ${k === top ? "leader" : ""}">
+            <div class="bar-label"><span>${esc(n)}</span><span>${k}</span></div>
+            <div class="bar"><span style="width:${(k / max) * 100}%"></span></div>
+          </div>`).join("") || `<p class="muted">No nominees yet.</p>`}
+      `;
+    }
+
+    // ---------- actions ----------
+    const openVoting = safe(async (id) => {
+      await setDoc(doc(db, "settings", "state"), { activeCategory: id }, { merge: true });
+    });
+    $("btnClose").onclick = safe(() => setDoc(doc(db, "settings", "state"), { activeCategory: null }, { merge: true }));
+
+    $("btnSeed").onclick = safe(async () => {
+      const b = writeBatch(db);
+      DEFAULT_CATEGORIES.forEach(({ id, ...rest }) => b.set(doc(db, "categories", id), { ...rest, nominees: [] }));
+      b.set(doc(db, "settings", "state"), { activeCategory: null }, { merge: true });
+      await b.commit();
+    });
+
+    $("btnAdd").onclick = safe(async () => {
+      const title = $("newName").value.trim();
+      if (!title) return;
+      const id = title.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") + "-" + Date.now().toString(36);
+      await setDoc(doc(db, "categories", id), { title, subtitle: "", emoji: "🏆", order: cats.length + 1, nominees: [] });
+      $("newName").value = "";
+      openEditor(id);
+    });
+
+    function openEditor(id) {
+      const c = cats.find((x) => x.id === id) || { title: $("newName").value, nominees: [] };
+      editId = id;
+      $("editor").hidden = false;
+      $("edName").value = c.title || "";
+      $("edSub").value = c.subtitle || "";
+      $("edEmoji").value = c.emoji || "🏆";
+      $("edNoms").value = (c.nominees || []).join("\n");
+      $("edMsg").innerHTML = "";
+      $("editor").scrollIntoView({ behavior: "smooth" });
+    }
+    $("edCancel").onclick = () => { $("editor").hidden = true; editId = null; };
+
+    $("edSave").onclick = safe(async () => {
+      const nominees = [...new Set($("edNoms").value.split("\n").map((s) => s.trim()).filter(Boolean))];
+      await updateDoc(doc(db, "categories", editId), {
+        title: $("edName").value.trim() || "Untitled",
+        subtitle: $("edSub").value.trim(),
+        emoji: $("edEmoji").value.trim() || "🏆",
+        nominees,
+      });
+      $("edMsg").innerHTML = `<p class="done" style="font-size:14px">Saved ✓</p>`;
+    });
+
+    $("edReset").onclick = safe(async () => {
+      if (!confirm("Delete ALL votes for this award?")) return;
+      const qs = await getDocs(query(collection(db, "votes"), where("categoryId", "==", editId)));
+      for (let i = 0; i < qs.docs.length; i += 450) {
+        const b = writeBatch(db);
+        qs.docs.slice(i, i + 450).forEach((d) => b.delete(d.ref));
+        await b.commit();
+      }
+      $("edMsg").innerHTML = `<p class="done" style="font-size:14px">Votes reset ✓</p>`;
+    });
+
+    $("edDelete").onclick = safe(async () => {
+      if (!confirm("Delete this award? (its votes stay until you reset them)")) return;
+      if (activeId === editId) await setDoc(doc(db, "settings", "state"), { activeCategory: null }, { merge: true });
+      await deleteDoc(doc(db, "categories", editId));
+      $("editor").hidden = true; editId = null;
+    });
+
+    // ---------- present mode ----------
+    $("btnPresent").onclick = () => {
+      const on = document.body.classList.toggle("present-mode");
+      $("btnPresent").textContent = on ? "Exit full screen" : "Present results full screen";
+      if (on && document.documentElement.requestFullscreen) document.documentElement.requestFullscreen().catch(() => {});
+      if (!on && document.fullscreenElement) document.exitFullscreen();
+    };
+    document.addEventListener("fullscreenchange", () => {
+      if (!document.fullscreenElement && document.body.classList.contains("present-mode")) $("btnPresent").click();
+    });
+  </script>
+</body>
+</html>
