@@ -94,3 +94,14 @@ export function withTimeout(promise, ms = 15000) {
     new Promise((_, rej) => setTimeout(() => rej({ code: "timeout" }), ms)),
   ]);
 }
+
+// "  ali   KHAN " → "Ali Khan"  (so the same person isn't listed twice)
+export function cleanName(s) {
+  return String(s ?? "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 40)
+    .toLowerCase()
+    .replace(/(^|[\s\-'.])(\p{L})/gu, (m, a, b) => a + b.toUpperCase());
+}
+export const nameKey = (s) => cleanName(s).toLowerCase();
