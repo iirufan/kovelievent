@@ -118,12 +118,19 @@
       unsubDisp = onSnapshot(doc(db, "publicView", "results"), (s) => {
         const r = s.exists() ? s.data() : null;
         if (!r) { displayEl.innerHTML = `<p class="muted">Results coming soon…</p>`; return; }
+        const final = !r.live && r.kind !== "nominate";
+        const winners = r.winners || [];
         displayEl.innerHTML = `
-          <span class="badge">${r.kind === "nominate" ? "NOMINATIONS" : "RESULTS"}</span>
+          <span class="badge ${r.live ? "nom" : ""}">${r.kind === "nominate" ? "NOMINATIONS" : r.live ? "LIVE RESULTS" : "FINAL RESULT"}</span>
           <div class="big-emoji" style="margin-top:8px">${esc(r.emoji || "🏆")}</div>
           <h2>${esc(r.title)}</h2>
           ${r.subtitle ? `<div class="sub">${esc(r.subtitle)}</div>` : ""}
-          <p class="total">${r.total} ${r.kind === "nominate" ? "nominators" : "votes"}</p>
+          ${final && winners.length ? `
+            <div class="winner-banner">
+              <div class="winner-label">${winners.length > 1 ? "🏆 It's a tie!" : "🏆 Winner"}</div>
+              <div class="winner-name">${winners.map(esc).join(" &amp; ")}</div>
+            </div>` : ""}
+          <p class="total">${r.total} ${r.kind === "nominate" ? "nominators" : "votes"}${r.live ? " · <span class='pulse'>voting open</span>" : ""}</p>
           <div style="text-align:left">${barsHTML((r.rows || []).map((x) => [x.n, x.k])) || `<p class="muted">No entries yet.</p>`}</div>`;
       }, (e) => (displayEl.innerHTML = explainError(e)));
     }
