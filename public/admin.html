@@ -44,12 +44,15 @@
             <div class="row">
               <strong>Awards</strong>
               <span class="spacer"></span>
-              <button id="btnClose" class="btn small secondary">Close</button>
+              <button id="btnClose" class="btn small secondary">Close voting</button>
             </div>
             <p class="muted" id="liveLine" style="font-size:14px"></p>
             <p class="muted" style="font-size:13px;margin-top:-4px">
-              <b>Nominate</b> = staff send up to 2 names each · <b>Vote</b> = staff pick one nominee
+              <b>Nominate</b> = staff send up to 2 names each · <b>Vote</b> = staff pick one nominee ·
+              <b>📊</b> = show that award's results on phones
             </p>
+            <label class="check"><input type="checkbox" id="autoShow" checked />
+              Show results on phones automatically when I close voting</label>
             <div id="cats"></div>
             <button id="btnSeed" class="btn small secondary" hidden>Create default awards</button>
           </div>
@@ -333,7 +336,8 @@
       const t = tallyFor(c);
       const payload = {
         categoryId: c.id, title: c.title, subtitle: c.subtitle || "", emoji: c.emoji || "🏆",
-        kind: t.kind, rows: t.rows.map(([n, k]) => ({ n, k })), total: t.total,
+        kind: t.kind, rows: t.rows.map(([n, k]) => ({ n, k })), total: t.total, live: t.isLive,
+        winners: t.rows.length && t.rows[0][1] > 0 ? t.rows.filter((r) => r[1] === t.rows[0][1]).map((r) => r[0]) : [],
       };
       const key = JSON.stringify(payload);
       if (key === lastPublished) return;
@@ -343,13 +347,19 @@
       } catch (e) { lastPublished = ""; showErr(e); }
     }
 
-    $("dispResults").onclick = safe(async () => {
-      if (!viewId) return;
+    // Show one award's results on every phone (publishes the numbers first, then switches phones over).
+    async function showResultsOnPhones(id, extra = {}) {
       lastPublished = "";
-      resultsCat = viewId; display = "results";
+      resultsCat = id; display = "results";
+      if ("activeCategory" in extra) activeId = extra.activeCategory;
       await publishResults();
-      await setDoc(doc(db, "settings", "state"), { display: "results", resultsCat: viewId }, { merge: true });
-    });
+      await setDoc(doc(db, "settings", "state"), { ...extra, display: "results", resultsCat: id }, { merge: true });
+    }
+    $("dispResults").onclick = safe(async () => { if (viewId) await showResultsOnPhones(viewId); });
+
+    // remember the auto-show choice on this computer
+    try { const v = localStorage.getItem("autoShow"); if (v !== null) $("autoShow").checked = v === "1"; } catch {}
+    $("autoShow").onchange = () => { try { localStorage.setItem("autoShow", $("autoShow").checked ? "1" : "0"); } catch {} };
     $("dispDraw").onclick = safe(() => setDoc(doc(db, "settings", "state"), { display: "draw" }, { merge: true }));
     $("dispOff").onclick = safe(() => setDoc(doc(db, "settings", "state"), { display: null }, { merge: true }));
 
@@ -379,6 +389,8 @@
             <div class="name">${esc(catName(c))} ${badge}</div>
             <div class="meta">${(c.nominees || []).length} nominees · ${nomCount(c.id)} nominators · ${voteCount(c.id)} votes</div>
           </div>
+          <button class="btn small ${display === "results" && resultsCat === c.id ? "showing" : "secondary"}" data-show="${esc(c.id)}"
+            title="${display === "results" && resultsCat === c.id ? "Showing on phones – click to hide" : "Show results on phones"}">📊</button>
           <button class="btn small secondary" data-edit="${esc(c.id)}">Edit</button>
           ${isLive && phase === "nominate" ? "" : `<button class="btn small nom" data-nom="${esc(c.id)}">Nominate</button>`}
           ${isLive && phase === "vote" ? "" : `<button class="btn small" data-open="${esc(c.id)}">Vote</button>`}
@@ -386,6 +398,15 @@
       }).join("");
       $("cats").querySelectorAll("[data-view]").forEach((el) => (el.onclick = () => { viewId = el.dataset.view; renderResults(); }));
       $("cats").querySelectorAll("[data-edit]").forEach((el) => (el.onclick = () => openEditor(el.dataset.edit)));
+      $("cats").querySelectorAll("[data-show]").forEach((el) => (el.onclick = safe(async () => {
+        const id = el.dataset.show;
+        viewId = id; renderResults();
+        if (display === "results" && resultsCat === id) {
+          await setDoc(doc(db, "settings", "state"), { display: null }, { merge: true });
+        } else {
+          await showResultsOnPhones(id);
+        }
+      })));
       $("cats").querySelectorAll("[data-nom]").forEach((el) => (el.onclick = () => openPhase(el.dataset.nom, "nominate")));
       $("cats").querySelectorAll("[data-open]").forEach((el) => (el.onclick = () => openPhase(el.dataset.open, "vote")));
     }
@@ -442,9 +463,21 @@
       if (ph === "vote" && c && !(c.nominees || []).length) {
         return alert("This award has no nominees yet. Add names with Edit, or open Nominations first.");
       }
-      await setDoc(doc(db, "settings", "state"), { activeCategory: id, phase: ph }, { merge: true });
+      // phones go back to voting: hide results that are on screen
+      const upd = { activeCategory: id, phase: ph };
+      if (display === "results") upd.display = null;
+      await setDoc(doc(db, "settings", "state"), upd, { merge: true });
     });
-    $("btnClose").onclick = safe(() => setDoc(doc(db, "settings", "state"), { activeCategory: null }, { merge: true }));
+    $("btnClose").onclick = safe(async () => {
+      const closing = activeId;
+      if (closing && phase === "vote" && $("autoShow").checked) {
+        // close voting and show the final results of that award on every phone
+        viewId = closing;
+        await showResultsOnPhones(closing, { activeCategory: null });
+      } else {
+        await setDoc(doc(db, "settings", "state"), { activeCategory: null }, { merge: true });
+      }
+    });
 
     $("btnSeed").onclick = safe(async () => {
       const b = writeBatch(db);
