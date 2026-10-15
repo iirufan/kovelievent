@@ -1,3 +1,4 @@
+@charset "UTF-8";
 :root {
   --bg: #0f1020;
   --card: #1a1b33;
@@ -125,7 +126,7 @@ label { font-size: 13px; color: var(--muted); display: block; margin: 10px 0 4px
   background: linear-gradient(90deg, var(--accent2), var(--accent));
   transition: width .5s ease;
 }
-.bar-row.leader .bar-label::before { content: "👑 "; }
+.bar-row.leader .bar-label span:first-child::before { content: "👑 "; }
 .total { font-size: 14px; color: var(--muted); }
 
 #qr { background: #fff; padding: 10px; border-radius: 12px; display: inline-block; }
@@ -186,3 +187,15 @@ select {
   padding: 10px 12px; margin: 4px 0 10px; font-size: 14px; text-align: left;
 }
 .phone-toggle.on { border-color: var(--ok); }
+
+/* ---------- results on phones ---------- */
+.btn.showing { background: var(--ok); color: #002914; }
+label.check { display: flex; align-items: center; gap: 8px; font-size: 14px; color: var(--text); margin: 4px 0 12px; cursor: pointer; }
+label.check input { width: 18px; height: 18px; accent-color: var(--accent); }
+.winner-banner {
+  margin: 14px 0 6px; padding: 16px; border-radius: 16px;
+  background: linear-gradient(135deg, rgba(255,204,51,.22), rgba(255,92,138,.18));
+  border: 2px solid var(--accent); animation: pop .5s ease-out;
+}
+.winner-label { font-size: 14px; font-weight: 800; color: var(--accent); letter-spacing: 1px; text-transform: uppercase; }
+.winner-name { font-size: 28px; font-weight: 900; margin-top: 4px; }
