@@ -1,0 +1,179 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>Office Awards – Vote</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div class="wrap">
+    <header class="top">
+      <div class="logo">🏆</div>
+      <h1>Office Awards</h1>
+      <p>One vote per phone, per award</p>
+    </header>
+
+    <div id="view" class="card center">
+      <p class="muted pulse" id="status">Loading…</p>
+      <noscript><p class="err">Please enable JavaScript.</p></noscript>
+    </div>
+  </div>
+
+  <script>
+    // Opening the file by double-click (file://) blocks the app scripts.
+    if (location.protocol === "file:") {
+      document.getElementById("view").innerHTML =
+        '<div class="errbox"><div class="errtitle">⚠️ Open through a web server</div>' +
+        'This page cannot run from a double-clicked file. Use <b>firebase deploy</b> and open the web.app link, ' +
+        'or run a local server (e.g. VS Code Live Server, or <b>npx serve public</b>).</div>';
+    }
+  </script>
+
+  <script type="module">
+    import { db, auth, esc, explainError, withTimeout, CONFIG_MISSING } from "./firebase-config.js";
+    import { signInAnonymously, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
+    import { doc, onSnapshot, getDoc, setDoc, serverTimestamp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+
+    const view = document.getElementById("view");
+    const render = (html) => (view.innerHTML = html);
+    const status = (t) => render(`<p class="muted pulse">${esc(t)}</p>`);
+    const fail = (e) => { console.error(e); render(explainError(e)); };
+
+    let uid = null;
+    let started = false;
+    let unsubState = null;
+    let unsubCat = null;
+    let currentCatId;     // undefined until first state arrives
+    let selected = null;
+
+    if (CONFIG_MISSING) {
+      fail({ code: "config-missing" });
+    } else {
+      boot();
+    }
+
+    function boot() {
+      status("Signing in…");
+      // Each phone/browser gets its own anonymous Firebase user = its voter ID.
+      onAuthStateChanged(auth, (user) => {
+        if (user && !started) { started = true; uid = user.uid; connect(); }
+      });
+      if (!auth.currentUser) {
+        withTimeout(signInAnonymously(auth)).catch(fail);
+      }
+    }
+
+    async function connect() {
+      status("Connecting to database…");
+      try {
+        // A one-time read first, so a missing database / bad rules shows an error instead of hanging.
+        await withTimeout(getDoc(doc(db, "settings", "state")));
+      } catch (e) {
+        return fail(e);
+      }
+      listen();
+    }
+
+    function listen() {
+      unsubState = onSnapshot(doc(db, "settings", "state"), (snap) => {
+        const active = snap.exists() ? snap.data().activeCategory || null : null;
+        if (active === currentCatId) return;
+        currentCatId = active;
+        selected = null;
+        if (unsubCat) { unsubCat(); unsubCat = null; }
+        if (!active) return showWaiting();
+        status("Loading award…");
+        unsubCat = onSnapshot(doc(db, "categories", active), (c) => {
+          if (!c.exists()) return showWaiting();
+          showCategory(active, c.data());
+        }, fail);
+      }, fail);
+    }
+
+    function showWaiting() {
+      render(`
+        <div class="big-emoji">⏳</div>
+        <h2>Please wait</h2>
+        <p class="muted pulse">Voting will open here when the host starts the next award.</p>
+      `);
+    }
+
+    function header(cat) {
+      return `
+        <div class="big-emoji">${esc(cat.emoji || "🏆")}</div>
+        <h2>${esc(cat.title)}</h2>
+        ${cat.subtitle ? `<div class="sub">${esc(cat.subtitle)}</div>` : ""}
+      `;
+    }
+
+    async function showCategory(catId, cat) {
+      // Did this phone already vote in this award?
+      let mine = null;
+      try {
+        mine = await getDoc(doc(db, "votes", `${catId}_${uid}`));
+      } catch (e) {
+        return fail(e);
+      }
+      if (catId !== currentCatId) return; // admin switched meanwhile
+      if (mine.exists()) return showVoted(cat, mine.data().nominee);
+
+      const nominees = cat.nominees || [];
+      if (!nominees.length) {
+        return render(`${header(cat)}<p class="muted">No nominees added yet.</p>`);
+      }
+      if (selected && !nominees.includes(selected)) selected = null;
+      render(`
+        ${header(cat)}
+        <p class="muted">Tap a name, then submit.</p>
+        <div class="nominees">
+          ${nominees.map((n, i) => `<button class="nominee${n === selected ? " selected" : ""}" data-i="${i}">${esc(n)}</button>`).join("")}
+        </div>
+        <button id="submit" class="btn block" ${selected ? "" : "disabled"}>Submit vote</button>
+        <div id="msg"></div>
+      `);
+      view.querySelectorAll(".nominee").forEach((b) =>
+        b.addEventListener("click", () => {
+          selected = nominees[+b.dataset.i];
+          view.querySelectorAll(".nominee").forEach((x) => x.classList.toggle("selected", x === b));
+          document.getElementById("submit").disabled = false;
+        })
+      );
+      document.getElementById("submit").addEventListener("click", () => submit(catId, cat));
+    }
+
+    async function submit(catId, cat) {
+      if (!selected) return;
+      const btn = document.getElementById("submit");
+      btn.disabled = true; btn.textContent = "Sending…";
+      try {
+        await withTimeout(setDoc(doc(db, "votes", `${catId}_${uid}`), {
+          categoryId: catId,
+          nominee: selected,
+          uid,
+          at: serverTimestamp(),
+        }));
+        showVoted(cat, selected);
+      } catch (e) {
+        console.error(e);
+        btn.disabled = false; btn.textContent = "Submit vote";
+        const msg = e.code === "permission-denied"
+          ? "Vote not accepted – you may have already voted, or voting for this award just closed."
+          : e.code === "timeout"
+          ? "No connection. Check your internet and try again."
+          : e.message;
+        document.getElementById("msg").innerHTML = `<p class="err">${esc(msg)}</p>`;
+      }
+    }
+
+    function showVoted(cat, nominee) {
+      render(`
+        ${header(cat)}
+        <p class="done">✓ Vote recorded</p>
+        <p>You voted for <strong>${esc(nominee)}</strong></p>
+        <p class="muted pulse">Keep this page open – the next award will appear automatically.</p>
+      `);
+    }
+  </script>
+</body>
+</html>
