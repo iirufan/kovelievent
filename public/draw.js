@@ -3,13 +3,13 @@
 //  Shared by index.html (staff) and admin.html.
 //
 //  Timeline of one draw (ms):
-//     0 – 9000   the drum spins: all balls turn together in one direction,
-//                speeding up, then slowing down during the countdown
-//  6000 – 9000   big 3 · 2 · 1 countdown
-//  9000          drum stops – the cap opens and the ball at the door goes out
-//  9400 – 10000  ball pops out through the cap
-//  10000 – 10400 cap closes
-//  10000 – 11000 ball flies to the middle and grows
+//     0 – 10800  the drum spins: all balls turn together in one direction
+//  6000 – 9000   big 3 · 2 · 1 countdown (drum keeps spinning at full speed)
+//  9000          0 → the cap flips open while the drum is still turning
+//  9100          the ball passing under the door shoots out up the neck
+//  9600 – 10000  cap closes
+//  9600 – 11000  ball flies to the middle and grows
+//  9800 – 10800  drum slows down and stops, the other balls drop
 //  11000         name revealed
 // ─────────────────────────────────────────────────────────────
 
@@ -18,12 +18,17 @@ export const REVEAL_MS = 11000; // when the name is shown
 
 const T = {
   countdown: 6000,
-  open: 9000,
-  opened: 9400,
-  out: 10000,
-  closed: 10400,
+  open: 9000,     // cap starts opening
+  opened: 9150,   // cap fully open
+  catch: 9100,    // drawn ball is right under the door
+  out: 9600,      // drawn ball is out of the neck
+  closed: 10000,  // cap closed again
+  slow: 9800,     // drum starts slowing down
+  stop: 10800,    // drum stopped
   reveal: REVEAL_MS,
 };
+const ACCEL = 900;                  // ms to reach full speed
+const OMEGA = (Math.PI * 2) / 1100; // full speed: about one turn per 1.1 s (radians per ms)
 
 const COLORS = ["#ffcc33", "#ff5c8a", "#7aa7ff", "#3ddc97", "#ff9f43", "#c38bff", "#4dd9e8", "#f4f4fb"];
 const MAX_BALLS = 40;
@@ -36,23 +41,20 @@ const easeInOut = (t) => (t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2)
 const easeOutBack = (t) => { const c = 1.7; return 1 + (c + 1) * Math.pow(t - 1, 3) + c * Math.pow(t - 1, 2); };
 const clamp01 = (t) => Math.max(0, Math.min(1, t));
 const prog = (e, a, b) => clamp01((e - a) / (b - a));
-const TURNS = 6; // full turns of the drum per draw
-
-// Drum angle progress 0..1: speeds up, spins, then slows to a stop (trapezoid speed profile).
-function spinProgress(u, a = 0.1, d = 0.5) {
-  const vmax = 1 / (1 - a / 2 - (1 - d) / 2);
-  if (u <= 0) return 0;
-  if (u >= 1) return 1;
-  if (u < a) return (vmax * u * u) / (2 * a);
-  if (u < d) return vmax * (a / 2 + (u - a));
-  const t = u - d, L = 1 - d;
-  return vmax * (a / 2 + (d - a) + t - (t * t) / (2 * L));
+// How far the drum has turned (radians) after t ms: speed up, full speed, then slow to a stop.
+function drumAngle(t) {
+  const a = ACCEL, d = T.slow, L = T.stop - T.slow;
+  if (t <= 0) return 0;
+  if (t < a) return (OMEGA * t * t) / (2 * a);
+  if (t < d) return OMEGA * (a / 2 + (t - a));
+  const x = Math.min(t, T.stop) - d;
+  return OMEGA * (a / 2 + (d - a) + x - (x * x) / (2 * L));
 }
-function spinSpeed(u, a = 0.1, d = 0.5) {
-  if (u <= 0 || u >= 1) return 0;
-  if (u < a) return u / a;
-  if (u < d) return 1;
-  return 1 - (u - d) / (1 - d);
+function drumSpeed(t) {
+  if (t <= 0 || t >= T.stop) return 0;
+  if (t < ACCEL) return t / ACCEL;
+  if (t < T.slow) return 1;
+  return 1 - (t - T.slow) / (T.stop - T.slow);
 }
 const shuffle = (arr) => {
   for (let i = arr.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [arr[i], arr[j]] = [arr[j], arr[i]]; }
@@ -202,8 +204,8 @@ export class DrawMachine {
       b.sx = b.x; b.sy = b.y;
       b.wob = Math.random() * Math.PI * 2;
     });
-    // start angle so that  slotAngle(winner) + theta0 + TURNS·2π  =  straight up
-    this.theta0 = -Math.PI / 2 - wb.slot.a - TURNS * Math.PI * 2;
+    // start angle so the drawn ball is straight up (under the door) exactly when the cap is open
+    this.theta0 = -Math.PI / 2 - wb.slot.a - drumAngle(T.catch);
   }
 
   showWinner(name) {
@@ -296,15 +298,14 @@ export class DrawMachine {
       e = now - this.spin.start;
       wb = this.balls.find((b) => b.name === this.spin.winner);
 
-      if (e < T.open) {
-        // the drum: every ball turns together around the centre
+      if (e < T.stop) {
+        // the drum: every ball turns together around the centre (keeps turning while the cap opens)
         rigid = true;
-        const u = e / T.open;
-        const theta = this.theta0 + spinProgress(u) * TURNS * Math.PI * 2;
-        glow = spinSpeed(u);
+        const theta = this.theta0 + drumAngle(e);
+        glow = drumSpeed(e);
         const blend = easeInOut(prog(e, 0, 800)); // lift from resting into the drum
         for (const b of this.balls) {
-          if (!b.slot) continue;
+          if (!b.slot || b.out) continue;
           const ang = b.slot.a + theta;
           const rad = b.slot.rf * this.R - Math.abs(Math.sin(e / 140 + b.wob)) * b.r * 0.12 * glow;
           const tx = this.cx + Math.cos(ang) * rad;
@@ -314,10 +315,12 @@ export class DrawMachine {
           b.vx = 0; b.vy = 0;
           b.rot = ang;
         }
+        // the ball passing under the open door shoots out
+        if (wb && e >= T.catch && !wb.out) { wb.out = true; wb.hx = wb.x; wb.hy = wb.y; }
       } else if (!this.spin.released) {
-        // drum stopped: the ball under the door is held there, the rest drop
+        // drum stopped: the other balls drop to the bottom
         this.spin.released = true;
-        if (wb) { wb.held = true; wb.hx = wb.x; wb.hy = wb.y; }
+        this.balls.forEach((b) => { b.vx = (Math.random() - 0.5) * 2; b.vy = 0; });
       }
 
       // countdown 3 · 2 · 1
@@ -337,15 +340,6 @@ export class DrawMachine {
         this.showWinner(name);
         if (this.onReveal) this.onReveal(name);
       }
-    }
-
-    // held ball nudges into the doorway, then leaves when the cap is open
-    if (wb && wb.held && this.mode === "spin") {
-      const t = easeInOut(prog(e, T.open, T.opened));
-      wb.x = wb.hx + (this.doorstep.x - wb.hx) * t;
-      wb.y = wb.hy + (this.doorstep.y - wb.hy) * t;
-      wb.vx = wb.vy = 0;
-      if (e >= T.opened) { wb.out = true; wb.held = false; }
     }
 
     if (!rigid) this.step(0);
@@ -379,8 +373,10 @@ export class DrawMachine {
     let flying = null;
     if (wb && wb.out && this.mode === "spin") {
       if (e < T.out) {
-        const t = easeInOut(prog(e, T.opened, T.out));
-        this.drawBall(cx, this.doorstep.y + (this.exitY - this.doorstep.y) * t, wb.r, wb.color, wb.name, 0, false);
+        // shoot straight up the neck from where it left the drum
+        const t = 1 - Math.pow(1 - prog(e, T.catch, T.out), 2);
+        const sx = wb.hx ?? cx, sy = wb.hy ?? this.doorstep.y;
+        this.drawBall(sx + (cx - sx) * Math.min(1, t * 3), sy + (this.exitY - sy) * t, wb.r, wb.color, wb.name, 0, false);
       } else {
         flying = prog(e, T.out, REVEAL_MS);
       }
