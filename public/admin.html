@@ -117,6 +117,10 @@
             <div class="card center">
               <h2 id="drawTitle">Lucky Draw</h2>
               <canvas id="drawCanvas" class="draw-canvas"></canvas>
+              <div class="phone-toggle hide-in-present">
+                <span id="drawPhoneLine">📱 Staff phones: …</span>
+                <button id="drawPhoneBtn" class="btn small">Show on phones</button>
+              </div>
               <div class="row hide-in-present" style="justify-content:center;margin:6px 0 4px">
                 <button id="btnDraw" class="btn">🎲 Draw a name</button>
               </div>
@@ -288,7 +292,7 @@
     const nomCount = (catId) => noms.filter((n) => n.categoryId === catId).length;
     const catName = (c) => `${c.emoji || "🏆"} ${c.title}${c.subtitle ? " — " + c.subtitle : ""}`;
 
-    function renderAll() { renderCats(); renderResults(); renderDisplayLine(); publishResults(); renderDrawSelect(); }
+    function renderAll() { renderCats(); renderResults(); renderDisplayLine(); publishResults(); renderDrawSelect(); renderDrawPhoneToggle(); }
 
     // Votes (or nominations, during/after the nomination phase) for one award.
     function tallyFor(c) {
@@ -348,6 +352,17 @@
     });
     $("dispDraw").onclick = safe(() => setDoc(doc(db, "settings", "state"), { display: "draw" }, { merge: true }));
     $("dispOff").onclick = safe(() => setDoc(doc(db, "settings", "state"), { display: null }, { merge: true }));
+
+    // On/off switch for the draw on staff phones (inside the Lucky draw tab)
+    function renderDrawPhoneToggle() {
+      const on = display === "draw";
+      $("drawPhoneLine").innerHTML = on ? "📱 Staff phones: <b>showing the draw live</b>" : "📱 Staff phones: <b>not showing the draw</b>";
+      $("drawPhoneBtn").textContent = on ? "Hide from phones" : "Show on phones";
+      $("drawPhoneBtn").classList.toggle("secondary", on);
+      document.querySelector(".phone-toggle").classList.toggle("on", on);
+    }
+    $("drawPhoneBtn").onclick = safe(() =>
+      setDoc(doc(db, "settings", "state"), { display: display === "draw" ? null : "draw" }, { merge: true }));
 
     function renderCats() {
       const live = cats.find((c) => c.id === activeId);
