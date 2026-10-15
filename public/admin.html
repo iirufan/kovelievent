@@ -3,15 +3,19 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Office Awards – Admin</title>
+  <title>KOVELI Awards 2026 – Admin</title>
   <link rel="stylesheet" href="style.css" />
+  <link rel="icon" type="image/png" href="favicon.png" />
+  <link rel="apple-touch-icon" href="apple-touch-icon.png" />
+  <meta name="theme-color" content="#0f1020" />
   <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
 </head>
 <body>
   <div class="wrap wide">
     <header class="top hide-in-present">
-      <div class="logo">🏆</div>
-      <h1>Office Awards — Admin</h1>
+      <img class="brand-logo" src="logo.png" alt="KOVELI logo" />
+      <h1><span class="brand">KOVELI</span> Awards <span class="year">2026</span></h1>
+      <p class="muted">Admin</p>
       <p id="who">Not signed in</p>
     </header>
 
@@ -29,9 +33,12 @@
             <div class="row">
               <strong>Awards</strong>
               <span class="spacer"></span>
-              <button id="btnClose" class="btn small secondary">Close voting</button>
+              <button id="btnClose" class="btn small secondary">Close</button>
             </div>
             <p class="muted" id="liveLine" style="font-size:14px"></p>
+            <p class="muted" style="font-size:13px;margin-top:-4px">
+              <b>Nominate</b> = staff send up to 2 names each · <b>Vote</b> = staff pick one nominee
+            </p>
             <div id="cats"></div>
             <button id="btnSeed" class="btn small secondary" hidden>Create default awards</button>
           </div>
@@ -48,11 +55,12 @@
             <input type="text" id="edSub" />
             <label>Emoji</label>
             <input type="text" id="edEmoji" maxlength="4" />
-            <label>Nominees — one name per line</label>
+            <label>Nominees — one name per line (staff nominations are added here automatically)</label>
             <textarea id="edNoms"></textarea>
             <div class="row" style="margin-top:12px">
               <button id="edSave" class="btn">Save</button>
               <span class="spacer"></span>
+              <button id="edResetNoms" class="btn small danger">Reset nominations</button>
               <button id="edReset" class="btn small danger">Reset votes</button>
               <button id="edDelete" class="btn small danger">Delete award</button>
             </div>
@@ -69,7 +77,7 @@
           </div>
 
           <div class="card center">
-            <strong>Staff voting link</strong>
+            <strong>Staff link</strong>
             <p class="muted" style="font-size:14px">Show this QR on screen — staff scan it with their phones.</p>
             <div id="qr"></div>
             <p class="link" id="voteLink"></p>
@@ -82,11 +90,15 @@
 
         <!-- RIGHT: live results -->
         <div>
+          <div class="present-brand">
+            <img src="logo.png" alt="" />
+            <span><span class="brand">KOVELI</span> Awards <span class="year">2026</span></span>
+          </div>
           <div class="card" id="results">
             <p class="muted">Select an award to see results.</p>
           </div>
           <div class="row">
-            <button id="btnPresent" class="btn small secondary">Present results full screen</button>
+            <button id="btnPresent" class="btn small secondary">Present full screen</button>
           </div>
         </div>
       </div>
@@ -94,7 +106,9 @@
   </div>
 
   <script type="module">
-    import { db, auth, esc, ADMIN_EMAILS, DEFAULT_CATEGORIES, explainError, withTimeout, CONFIG_MISSING } from "./firebase-config.js";
+    import {
+      db, auth, esc, ADMIN_EMAILS, DEFAULT_CATEGORIES, explainError, withTimeout, CONFIG_MISSING, cleanName, nameKey,
+    } from "./firebase-config.js";
     import {
       GoogleAuthProvider, signInWithPopup, signInWithRedirect, getRedirectResult, onAuthStateChanged, signOut,
     } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
@@ -105,7 +119,9 @@
     const $ = (id) => document.getElementById(id);
     let cats = [];             // [{id, ...data}]
     let votes = [];            // [{categoryId, nominee}]
-    let activeId = null;       // award currently open for voting
+    let noms = [];             // [{categoryId, names}]
+    let activeId = null;       // award currently open
+    let phase = "vote";        // "nominate" | "vote"
     let viewId = null;         // award shown in the results panel
     let editId = null;
     let started = false;
@@ -171,13 +187,16 @@
         // One-time read first, so a missing database / bad rules shows a clear error instead of hanging.
         await withTimeout(getDoc(doc(db, "settings", "state")));
         await withTimeout(getDocs(collection(db, "votes")));
+        await withTimeout(getDocs(collection(db, "nominations")));
       } catch (e) {
         return showErr(e);
       }
       $("results").innerHTML = `<p class="muted">Select an award to see results.</p>`;
 
       onSnapshot(doc(db, "settings", "state"), (s) => {
-        activeId = s.exists() ? s.data().activeCategory : null;
+        const d = s.exists() ? s.data() : {};
+        activeId = d.activeCategory || null;
+        phase = d.phase || "vote";
         if (activeId) viewId = activeId;
         renderAll();
       }, showErr);
@@ -186,73 +205,118 @@
         cats = qs.docs.map((d) => ({ id: d.id, ...d.data() })).sort((a, b) => (a.order ?? 99) - (b.order ?? 99));
         $("btnSeed").hidden = cats.length > 0;
         renderAll();
+        // keep the editor's nominee box in sync while nominations stream in (unless admin is typing in it)
+        if (editId && document.activeElement !== $("edNoms")) {
+          const c = cats.find((x) => x.id === editId);
+          if (c) $("edNoms").value = (c.nominees || []).join("\n");
+        }
       }, showErr);
 
       onSnapshot(collection(db, "votes"), (qs) => {
         votes = qs.docs.map((d) => d.data());
         renderAll();
       }, showErr);
+
+      onSnapshot(collection(db, "nominations"), (qs) => {
+        noms = qs.docs.map((d) => d.data());
+        renderAll();
+      }, showErr);
     }
     function showErr(e) { console.error(e); $("results").innerHTML = explainError(e); }
     const safe = (fn) => async (...a) => { try { await fn(...a); } catch (e) { showErr(e); } };
 
-    const countFor = (catId) => votes.filter((v) => v.categoryId === catId).length;
+    const voteCount = (catId) => votes.filter((v) => v.categoryId === catId).length;
+    const nomCount = (catId) => noms.filter((n) => n.categoryId === catId).length;
     const catName = (c) => `${c.emoji || "🏆"} ${c.title}${c.subtitle ? " — " + c.subtitle : ""}`;
 
     function renderAll() { renderCats(); renderResults(); }
 
     function renderCats() {
       const live = cats.find((c) => c.id === activeId);
-      $("liveLine").innerHTML = live ? `Voting open: <strong>${esc(catName(live))}</strong>` : "Voting is closed. Pick an award and press Open.";
+      $("liveLine").innerHTML = live
+        ? `${phase === "nominate" ? "Nominations" : "Voting"} open: <strong>${esc(catName(live))}</strong>`
+        : "Everything is closed. Pick an award and press Nominate or Vote.";
       $("btnClose").disabled = !activeId;
-      $("cats").innerHTML = cats.map((c) => `
-        <div class="cat ${c.id === activeId ? "live" : ""}">
+      $("cats").innerHTML = cats.map((c) => {
+        const isLive = c.id === activeId;
+        const badge = isLive ? `<span class="badge ${phase === "nominate" ? "nom" : ""}">${phase === "nominate" ? "NOMINATING" : "VOTING"}</span>` : "";
+        return `
+        <div class="cat ${isLive ? "live" : ""}">
           <div style="flex:1;min-width:0;cursor:pointer" data-view="${esc(c.id)}">
-            <div class="name">${esc(catName(c))} ${c.id === activeId ? '<span class="badge">LIVE</span>' : ""}</div>
-            <div class="meta">${(c.nominees || []).length} nominees · ${countFor(c.id)} votes</div>
+            <div class="name">${esc(catName(c))} ${badge}</div>
+            <div class="meta">${(c.nominees || []).length} nominees · ${nomCount(c.id)} nominators · ${voteCount(c.id)} votes</div>
           </div>
           <button class="btn small secondary" data-edit="${esc(c.id)}">Edit</button>
-          ${c.id === activeId ? "" : `<button class="btn small" data-open="${esc(c.id)}">Open</button>`}
-        </div>`).join("");
+          ${isLive && phase === "nominate" ? "" : `<button class="btn small nom" data-nom="${esc(c.id)}">Nominate</button>`}
+          ${isLive && phase === "vote" ? "" : `<button class="btn small" data-open="${esc(c.id)}">Vote</button>`}
+        </div>`;
+      }).join("");
       $("cats").querySelectorAll("[data-view]").forEach((el) => (el.onclick = () => { viewId = el.dataset.view; renderResults(); }));
       $("cats").querySelectorAll("[data-edit]").forEach((el) => (el.onclick = () => openEditor(el.dataset.edit)));
-      $("cats").querySelectorAll("[data-open]").forEach((el) => (el.onclick = () => openVoting(el.dataset.open)));
+      $("cats").querySelectorAll("[data-nom]").forEach((el) => (el.onclick = () => openPhase(el.dataset.nom, "nominate")));
+      $("cats").querySelectorAll("[data-open]").forEach((el) => (el.onclick = () => openPhase(el.dataset.open, "vote")));
+    }
+
+    function bars(rows) {
+      const max = Math.max(1, ...rows.map((r) => r[1]));
+      const top = rows.length && rows[0][1] > 0 ? rows[0][1] : -1;
+      return rows.map(([n, k]) => `
+        <div class="bar-row ${k === top ? "leader" : ""}">
+          <div class="bar-label"><span>${esc(n)}</span><span>${k}</span></div>
+          <div class="bar"><span style="width:${(k / max) * 100}%"></span></div>
+        </div>`).join("");
     }
 
     function renderResults() {
       const c = cats.find((x) => x.id === viewId);
       if (!c) { $("results").innerHTML = `<p class="muted">Select an award to see results.</p>`; return; }
+      const isLive = c.id === activeId;
+      const showNoms = isLive ? phase === "nominate" : voteCount(c.id) === 0 && nomCount(c.id) > 0;
+      const head = `
+        <div class="center">
+          <div class="big-emoji">${esc(c.emoji || "🏆")}</div>
+          <h2>${esc(c.title)}</h2>
+          ${c.subtitle ? `<div class="sub">${esc(c.subtitle)}</div>` : ""}`;
+
+      if (showNoms) {
+        // How many people nominated each name.
+        const mine = noms.filter((n) => n.categoryId === c.id);
+        const tally = new Map((c.nominees || []).map((n) => [n, 0]));
+        mine.forEach((n) => (n.names || []).forEach((name) => tally.set(name, (tally.get(name) || 0) + 1)));
+        const rows = [...tally.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+        $("results").innerHTML = `${head}
+            <p class="total">${mine.length} ${mine.length === 1 ? "person has" : "people have"} nominated · ${rows.length} names
+            ${isLive ? "· <span class='pulse'>nominations open</span>" : "· closed"}</p>
+          </div>
+          <p class="muted" style="font-size:13px">Number = how many people nominated that name.</p>
+          ${bars(rows) || `<p class="muted">No nominations yet.</p>`}`;
+        return;
+      }
+
       const mine = votes.filter((v) => v.categoryId === c.id);
       const tally = new Map((c.nominees || []).map((n) => [n, 0]));
       mine.forEach((v) => tally.set(v.nominee, (tally.get(v.nominee) || 0) + 1));
       const rows = [...tally.entries()].sort((a, b) => b[1] - a[1]);
-      const max = Math.max(1, ...rows.map((r) => r[1]));
-      const top = rows.length && rows[0][1] > 0 ? rows[0][1] : -1;
-      $("results").innerHTML = `
-        <div class="center">
-          <div class="big-emoji">${esc(c.emoji || "🏆")}</div>
-          <h2>${esc(c.title)}</h2>
-          ${c.subtitle ? `<div class="sub">${esc(c.subtitle)}</div>` : ""}
-          <p class="total">${mine.length} vote${mine.length === 1 ? "" : "s"} ${c.id === activeId ? "· <span class='pulse'>voting open</span>" : "· closed"}</p>
+      $("results").innerHTML = `${head}
+          <p class="total">${mine.length} vote${mine.length === 1 ? "" : "s"} ${isLive ? "· <span class='pulse'>voting open</span>" : "· closed"}</p>
         </div>
-        ${rows.map(([n, k]) => `
-          <div class="bar-row ${k === top ? "leader" : ""}">
-            <div class="bar-label"><span>${esc(n)}</span><span>${k}</span></div>
-            <div class="bar"><span style="width:${(k / max) * 100}%"></span></div>
-          </div>`).join("") || `<p class="muted">No nominees yet.</p>`}
-      `;
+        ${bars(rows) || `<p class="muted">No nominees yet.</p>`}`;
     }
 
     // ---------- actions ----------
-    const openVoting = safe(async (id) => {
-      await setDoc(doc(db, "settings", "state"), { activeCategory: id }, { merge: true });
+    const openPhase = safe(async (id, ph) => {
+      const c = cats.find((x) => x.id === id);
+      if (ph === "vote" && c && !(c.nominees || []).length) {
+        return alert("This award has no nominees yet. Add names with Edit, or open Nominations first.");
+      }
+      await setDoc(doc(db, "settings", "state"), { activeCategory: id, phase: ph }, { merge: true });
     });
     $("btnClose").onclick = safe(() => setDoc(doc(db, "settings", "state"), { activeCategory: null }, { merge: true }));
 
     $("btnSeed").onclick = safe(async () => {
       const b = writeBatch(db);
       DEFAULT_CATEGORIES.forEach(({ id, ...rest }) => b.set(doc(db, "categories", id), { ...rest, nominees: [] }));
-      b.set(doc(db, "settings", "state"), { activeCategory: null }, { merge: true });
+      b.set(doc(db, "settings", "state"), { activeCategory: null, phase: "vote" }, { merge: true });
       await b.commit();
     });
 
@@ -279,25 +343,43 @@
     $("edCancel").onclick = () => { $("editor").hidden = true; editId = null; };
 
     $("edSave").onclick = safe(async () => {
-      const nominees = [...new Set($("edNoms").value.split("\n").map((s) => s.trim()).filter(Boolean))];
+      // Clean + remove duplicates (case-insensitive), keep first spelling.
+      const seen = new Set();
+      const nominees = [];
+      $("edNoms").value.split("\n").forEach((raw) => {
+        const n = cleanName(raw);
+        if (n && !seen.has(nameKey(n))) { seen.add(nameKey(n)); nominees.push(n); }
+      });
       await updateDoc(doc(db, "categories", editId), {
         title: $("edName").value.trim() || "Untitled",
         subtitle: $("edSub").value.trim(),
         emoji: $("edEmoji").value.trim() || "🏆",
         nominees,
       });
+      $("edNoms").value = nominees.join("\n");
       $("edMsg").innerHTML = `<p class="done" style="font-size:14px">Saved ✓</p>`;
     });
 
-    $("edReset").onclick = safe(async () => {
-      if (!confirm("Delete ALL votes for this award?")) return;
-      const qs = await getDocs(query(collection(db, "votes"), where("categoryId", "==", editId)));
+    async function deleteWhere(coll, catId) {
+      const qs = await getDocs(query(collection(db, coll), where("categoryId", "==", catId)));
       for (let i = 0; i < qs.docs.length; i += 450) {
         const b = writeBatch(db);
         qs.docs.slice(i, i + 450).forEach((d) => b.delete(d.ref));
         await b.commit();
       }
-      $("edMsg").innerHTML = `<p class="done" style="font-size:14px">Votes reset ✓</p>`;
+      return qs.size;
+    }
+
+    $("edReset").onclick = safe(async () => {
+      if (!confirm("Delete ALL votes for this award?")) return;
+      const n = await deleteWhere("votes", editId);
+      $("edMsg").innerHTML = `<p class="done" style="font-size:14px">${n} votes deleted ✓</p>`;
+    });
+
+    $("edResetNoms").onclick = safe(async () => {
+      if (!confirm("Let everyone nominate again for this award?\n(Names already in the nominee list stay — remove them in the box above and Save if needed.)")) return;
+      const n = await deleteWhere("nominations", editId);
+      $("edMsg").innerHTML = `<p class="done" style="font-size:14px">${n} nominations reset ✓</p>`;
     });
 
     $("edDelete").onclick = safe(async () => {
@@ -310,7 +392,7 @@
     // ---------- present mode ----------
     $("btnPresent").onclick = () => {
       const on = document.body.classList.toggle("present-mode");
-      $("btnPresent").textContent = on ? "Exit full screen" : "Present results full screen";
+      $("btnPresent").textContent = on ? "Exit full screen" : "Present full screen";
       if (on && document.documentElement.requestFullscreen) document.documentElement.requestFullscreen().catch(() => {});
       if (!on && document.fullscreenElement) document.exitFullscreen();
     };
