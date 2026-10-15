@@ -14,7 +14,7 @@ const firebaseConfig = {
 // ─────────────────────────────────────────────────────────────
 //  2) Admin Google email(s). Must ALSO be listed in firestore.rules.
 // ─────────────────────────────────────────────────────────────
-export const ADMIN_EMAILS = ["admin@yourcompany.com"];
+export const ADMIN_EMAILS = ["iirufan@gmail.com"];
 
 // Awards created by the "Create default awards" button on the admin page.
 // IDs must not contain underscores.
