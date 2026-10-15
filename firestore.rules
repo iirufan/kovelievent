@@ -1,0 +1,50 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ── Put the admin Google account(s) here (same as ADMIN_EMAILS in firebase-config.js)
+    function isAdmin() {
+      return request.auth != null
+        && request.auth.token.email_verified == true
+        && request.auth.token.email in ['admin@yourcompany.com'];
+    }
+
+    function state() {
+      return get(/databases/$(database)/documents/settings/state).data;
+    }
+
+    // Which award is open. Everyone reads, only admin changes.
+    match /settings/{id} {
+      allow read: if request.auth != null;
+      allow write: if isAdmin();
+    }
+
+    // Awards + nominee lists. Everyone reads, only admin changes.
+    match /categories/{catId} {
+      allow read: if request.auth != null;
+      allow write: if isAdmin();
+    }
+
+    // One vote per phone per award:
+    //   doc ID is forced to be "<categoryId>_<voterUid>", and votes can never be
+    //   updated, so a second vote from the same phone is rejected.
+    match /votes/{voteId} {
+      // A voter may check only their own vote; admin can read everything.
+      allow get: if request.auth != null
+        && (voteId.split('_')[1] == request.auth.uid || isAdmin());
+      allow list: if isAdmin();
+
+      allow create: if request.auth != null
+        && request.resource.data.keys().hasOnly(['categoryId', 'nominee', 'uid', 'at'])
+        && request.resource.data.uid == request.auth.uid
+        && voteId == request.resource.data.categoryId + '_' + request.auth.uid
+        && request.resource.data.categoryId == state().activeCategory
+        && request.resource.data.nominee in
+             get(/databases/$(database)/documents/categories/$(request.resource.data.categoryId)).data.nominees
+        && request.resource.data.at == request.time;
+
+      allow update: if false;
+      allow delete: if isAdmin();
+    }
+  }
+}
