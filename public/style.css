@@ -179,3 +179,10 @@ select {
 @keyframes pop { from { transform: scale(.85); opacity: 0; } to { transform: scale(1); opacity: 1; } }
 .present-mode .pick-name { font-size: 24px; }
 .present-mode .draw-canvas { max-width: 760px; }
+
+.phone-toggle {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap;
+  background: var(--card2); border: 2px solid transparent; border-radius: 12px;
+  padding: 10px 12px; margin: 4px 0 10px; font-size: 14px; text-align: left;
+}
+.phone-toggle.on { border-color: var(--ok); }
