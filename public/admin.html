@@ -168,7 +168,7 @@
     import {
       doc, collection, onSnapshot, getDoc, setDoc, updateDoc, deleteDoc, writeBatch, query, where, getDocs, serverTimestamp,
     } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
-    import { DrawMachine, syncDraw, fairIndex, DRAW_MS } from "./draw.js";
+    import { DrawMachine, syncDraw, drawPool as pickBalls, planDraw, randomSeed } from "./draw.js";
 
     const $ = (id) => document.getElementById(id);
     let cats = [];             // [{id, ...data}]
@@ -613,12 +613,17 @@
       const rem = drawRemaining();
       if (!rem.length || machine.mode === "spin") return;
       $("btnDraw").disabled = true;
-      const winner = rem[fairIndex(rem.length)];
+      // Fair random order of the balls (max 40 in the bowl) + a random seed for the air.
+      // The same seed gives the same bouncing on every phone; the first ball into the door wins.
+      const pool = pickBalls(rem);
+      const seed = randomSeed();
+      const plan = planDraw(pool, seed);
+      const winner = plan.winner;
       const spinId = Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
       const picks = [...(drawData.picks || []), { no: (drawData.picks || []).length + 1, name: winner, spinId }];
       await setDoc(doc(db, "draw", "current"), {
         title: drawData.title || $("drawName").value.trim() || "Lucky Draw",
-        spin: { id: spinId, winner, pool: rem, at: serverTimestamp() },
+        spin: { id: spinId, winner, pool, seed, catchStep: plan.catchStep, at: serverTimestamp() },
         picks,
       }, { merge: true });
       // make sure staff phones are watching
