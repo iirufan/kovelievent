@@ -63,12 +63,12 @@ function mulberry32(seed) {
 
 // ═════════════════════ physics (unit bowl: centre 0,0 · radius 1 · y points down) ═════════════════════
 export function ballRadius(n) {
-  return Math.max(0.07, Math.min(0.19, 0.92 / Math.sqrt(Math.max(n, 1) * 1.35)));
+  return Math.max(0.055, Math.min(0.12, 0.62 / Math.sqrt(Math.max(n, 1) * 1.35)));
 }
 
 const G = 0.0025;      // gravity per step
 // Air comes in bursts: a ball in the lower part of the bowl is randomly launched upward.
-export const PHYS = { FUNNEL: 0.03, KICK_P: 0.1, KICK_Y: 0.2, KICK_MIN: 0.05, KICK_RANGE: 0.055, DAMP: 0.995, VMAX: 0.13 };
+export const PHYS = { FUNNEL: 0.12, KICK_P: 0.2, KICK_Y: 0.2, KICK_MIN: 0.045, KICK_RANGE: 0.065, DAMP: 0.995, VMAX: 0.13, FRESH: 40, DOOR_W: 1.3 };
 
 class Sim {
   constructor(n, rand, positions) {
@@ -81,9 +81,10 @@ class Sim {
       let x, y;
       if (positions && positions[i]) { x = positions[i].x; y = positions[i].y; }
       else {
-        do { x = this.rand() * 2 - 1; y = this.rand() * 0.95; } while (x * x + y * y > lim * lim);
+        do { x = this.rand() * 2 - 1; y = this.rand() * 1.7 - 0.75; } while (x * x + y * y > lim * lim);
       }
-      this.balls.push({ x, y, vx: 0, vy: 0, out: false });
+      // rot/w = how the ball is turned / spinning (only for looks)
+      this.balls.push({ x, y, vx: 0, vy: 0, out: false, rot: i * 1.7, w: 0, low: 0 });
     }
   }
 
@@ -97,7 +98,8 @@ class Sim {
         if (b.y > PHYS.KICK_Y && rand() < PHYS.KICK_P * air) {      // air burst from the bottom
           const boost = air > 1 ? air : 1;
           b.vy = -(PHYS.KICK_MIN + rand() * PHYS.KICK_RANGE) * boost * (air < 1 ? 0.5 + 0.5 * air : 1);
-          b.vx += (rand() - 0.5) * 0.05;
+          b.vx += (rand() - 0.5) * 0.06;
+          b.w += (rand() - 0.5) * 0.5;                               // the burst sets it spinning
           if (air > 1) b.vx -= b.x * PHYS.FUNNEL;                    // when the cap is open, air aims at the door
         }
         b.vx += (rand() - 0.5) * 0.004 * air;                       // turbulence
@@ -109,6 +111,8 @@ class Sim {
       const vm = PHYS.VMAX;
       if (sp2 > vm * vm) { const k = vm / Math.sqrt(sp2); b.vx *= k; b.vy *= k; }
       b.x += b.vx; b.y += b.vy;
+      b.rot += b.w; b.w *= 0.985;
+      if (b.y > 0.1) b.low = this.t;                                 // last time it was in the lower half
       // bowl wall
       const lim = 1 - r - 0.015;
       const d2 = b.x * b.x + b.y * b.y;
@@ -116,7 +120,10 @@ class Sim {
         const d = Math.sqrt(d2), nx = b.x / d, ny = b.y / d;
         b.x = nx * lim; b.y = ny * lim;
         const vn = b.vx * nx + b.vy * ny;
-        if (vn > 0) { b.vx -= 1.7 * vn * nx; b.vy -= 1.7 * vn * ny; }
+        if (vn > 0) {
+          b.vx -= 1.7 * vn * nx; b.vy -= 1.7 * vn * ny;
+          b.w += ((b.vx * -ny + b.vy * nx) / r) * 0.25;              // rolling along the glass spins it
+        }
       }
     }
     // ball–ball collisions
@@ -136,6 +143,8 @@ class Sim {
           if (rel < 0) {
             const imp = -rel * 0.92;
             a.vx -= imp * nx; a.vy -= imp * ny; c.vx += imp * nx; c.vy += imp * ny;
+            const tang = ((c.vx - a.vx) * -ny + (c.vy - a.vy) * nx) / r;  // glancing hits spin both balls
+            a.w -= tang * 0.15; c.w -= tang * 0.15;
           }
         }
       }
@@ -145,17 +154,18 @@ class Sim {
 
   inDoor(b) {
     const r = this.r;
-    return b.x < r * 0.9 && b.x > -r * 0.9 && b.y < -1 + r + 0.06;
+    return b.x < r * PHYS.DOOR_W && b.x > -r * PHYS.DOOR_W && b.y < -1 + r + 0.06;
   }
   // Index of a ball that has just flown up into the open door, or -1.
-  // (A ball already sitting there when the cap opens doesn't count until it comes back.)
+  // Only a ball that came up from the lower half within the last ~0.75 s counts,
+  // so balls hanging around the top have no advantage.
   ballEnteringDoor() {
     let best = -1, bestY = Infinity;
     for (let i = 0; i < this.balls.length; i++) {
       const b = this.balls[i];
       if (b.out) continue;
       const inside = this.inDoor(b);
-      if (inside && !b.wasIn && b.y < bestY) { best = i; bestY = b.y; }
+      if (inside && !b.wasIn && this.t - b.low <= PHYS.FRESH && b.y < bestY) { best = i; bestY = b.y; }
       b.wasIn = inside;
     }
     return best;
@@ -233,15 +243,15 @@ export class DrawMachine {
   resize() {
     const dpr = Math.min(window.devicePixelRatio || 1, 2);
     const w = this.canvas.clientWidth || 320;
-    const h = Math.min(Math.round(w * 0.95), 560);
+    const h = Math.min(Math.round(w * 1.08), 640);
     this.canvas.style.height = h + "px";
     this.canvas.width = Math.round(w * dpr);
     this.canvas.height = Math.round(h * dpr);
     this.ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     this.w = w; this.h = h;
-    this.R = Math.min(w, h) * 0.36;
+    this.R = Math.min(w * 0.45, h * 0.41);
     this.cx = w / 2;
-    this.cy = h * 0.56;
+    this.cy = h * 0.53;
   }
 
   get ballR() { return this.sim.r * this.R; }
@@ -389,7 +399,7 @@ export class DrawMachine {
         const p0 = this.px(f);
         x = p0.x + (x - p0.x) * blend; y = p0.y + (y - p0.y) * blend;
       }
-      this.drawBall(x, y, br, COLORS[i % COLORS.length], this.names[i], b.x * 3, false);
+      this.drawBall(x, y, br, COLORS[i % COLORS.length], this.names[i], b.rot, false);
     });
 
     // winner shooting up the neck
@@ -560,7 +570,7 @@ export class DrawMachine {
     } else if (r >= 12) {
       ctx.save();
       ctx.translate(x, y);
-      ctx.rotate(Math.sin(rot) * 0.5);
+      ctx.rotate(rot);
       let label = String(name).split(" ")[0];
       let size = r * 0.58;
       ctx.font = `700 ${size}px ${FONT}`;
