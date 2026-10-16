@@ -276,7 +276,15 @@ export class DrawMachine {
     const pos = list.map((n) => { const b = old.get(n); return b && !b.out ? { x: b.x, y: b.y } : null; });
     this.names = list;
     this.sim = new Sim(list.length, Math.random, pos);
+    // new balls: let them drop and settle at the bottom before they are shown (no bouncing before the draw)
+    if (pos.some((p) => !p)) { this.settle(400); this.frozenSim = this.sim; }
     this.mode = this.mode === "spin" ? "idle" : this.mode;
+  }
+
+  // Run the resting physics quietly until the balls lie still.
+  settle(steps) {
+    for (let i = 0; i < steps; i++) this.sim.step(0);
+    for (const b of this.sim.balls) { b.vx = 0; b.vy = 0; b.w = 0; }
   }
 
   // Start (or join) a draw. offsetMs = how far into it we already are.
@@ -371,7 +379,19 @@ export class DrawMachine {
         if (this.onReveal) this.onReveal(name);
       }
     } else {
-      this.sim.step(0); // resting balls settle under gravity
+      // not drawing: balls just rest at the bottom – no air, no spinning
+      // (once they have stopped, freeze them completely)
+      if (this.sim !== this.frozenSim) {
+        const turned = this.sim.balls.map((b) => b.rot);
+        this.sim.step(0);
+        let fastest = 0;
+        this.sim.balls.forEach((b, i) => {
+          b.rot = turned[i]; b.w = 0; b.vx *= 0.9;
+          if (!b.out) fastest = Math.max(fastest, Math.abs(b.vx) + Math.abs(b.vy));
+        });
+        this.calm = fastest < 0.004 ? (this.calm || 0) + 1 : 0;
+        if (this.calm > 30) { this.frozenSim = this.sim; this.calm = 0; }
+      }
     }
 
     // ───────── draw ─────────
